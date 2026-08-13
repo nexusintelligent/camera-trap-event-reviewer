@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>野生動物事件判讀台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-block">
+      <div class="brand-mark" aria-hidden="true">CT</div>
+      <div class="brand-copy">
+        <div class="eyebrow">CAMERA TRAP · GOLD DATA</div>
+        <h1 id="app-title">野生動物事件判讀台</h1>
+      </div>
+    </div>
+    <div class="top-actions">
+      <div class="save-state" id="save-state"><span></span>尚未修改</div>
+      <a class="button ghost" href="/api/export.csv">匯出目前 CSV</a>
+      <button class="button primary" id="save-button" type="button">儲存 <kbd>Ctrl</kbd>+<kbd>S</kbd></button>
+    </div>
+  </header>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <section class="progress-panel">
+        <div class="progress-label"><span>覆核進度</span><strong id="progress-text">0 / 0</strong></div>
+        <div class="progress-track"><div id="progress-bar"></div></div>
+        <div class="progress-meta" id="progress-meta">正在載入事件…</div>
+      </section>
+
+      <section class="filters">
+        <label class="search-box">
+          <span aria-hidden="true">⌕</span>
+          <input id="search-input" type="search" placeholder="事件編號、檔名、提示…">
+        </label>
+        <div class="filter-row">
+          <select id="filter-select" aria-label="篩選事件">
+            <option value="all">全部事件</option>
+            <option value="unreviewed">尚未覆核</option>
+            <option value="reviewed">已覆核</option>
+            <option value="audit">隨機稽核</option>
+            <option value="challenge">挑戰樣本</option>
+            <option value="night">夜間樣本</option>
+            <option value="filename_hint">有檔名提示</option>
+          </select>
+          <span id="filter-count">0</span>
+        </div>
+      </section>
+
+      <nav class="event-list" id="event-list" aria-label="事件清單"></nav>
+    </aside>
+
+    <main class="workspace">
+      <section class="event-head">
+        <div>
+          <div class="eyebrow" id="deployment-label">DEPLOYMENT</div>
+          <h2 id="event-id">載入中…</h2>
+          <div class="event-time" id="event-time"></div>
+        </div>
+        <div class="event-nav">
+          <button class="button ghost" id="previous-button" type="button">← 上一組</button>
+          <span id="event-position">0 / 0</span>
+          <button class="button ghost" id="next-button" type="button">下一組 →</button>
+        </div>
+      </section>
+
+      <section class="metadata-strip" id="metadata-strip"></section>
+
+      <section class="photo-section card">
+        <div class="section-head">
+          <div>
+            <span class="step-number">01</span>
+            <div>
+              <h3>照片優先判讀</h3>
+              <p>先看同一次觸發的三張照片；暫時不要用影片補答案。</p>
+            </div>
+          </div>
+          <div class="shortcut-note">點照片可放大</div>
+        </div>
+        <div class="photo-grid" id="photo-grid"></div>
+        <div class="decision-bar">
+          <span>照片判定</span>
+          <div class="segmented" id="photo-decision-buttons"></div>
+          <input type="hidden" id="PhotoOnlyDecision" name="PhotoOnlyDecision">
+        </div>
+      </section>
+
+      <section class="video-section card" id="video-section">
+        <div class="section-head">
+          <div>
+            <span class="step-number muted">02</span>
+            <div>
+              <h3>影片第二輪</h3>
+              <p>完成照片判定後再開啟，記錄影片是否新增動物證據。</p>
+            </div>
+          </div>
+          <button class="button warm" id="unlock-video-button" type="button">啟用影片第二輪</button>
+        </div>
+        <div id="video-content" class="video-locked">
+          <div class="lock-icon" aria-hidden="true">▶</div>
+          <strong>影片目前隱藏</strong>
+          <span>避免第一輪照片判定受到影片資訊影響</span>
+        </div>
+      </section>
+
+      <section class="annotation-section card">
+        <div class="section-head">
+          <div>
+            <span class="step-number">03</span>
+            <div>
+              <h3>最終分類與物種</h3>
+              <p>證據不足時保留不確定，或只標到目、科、屬；不要強迫填到物種。</p>
+            </div>
+          </div>
+          <button class="text-button" id="copy-photo-decision" type="button">套用照片判定到最終</button>
+        </div>
+
+        <div id="filename-hint" class="hint-banner hidden"></div>
+        <div class="conservative-note">
+          <strong>保守判讀原則</strong>
+          <span>檔名和候選清單只提供提示，不是答案。無法可靠鑑定時使用「未知動物」或較高分類階層。</span>
+        </div>
+
+        <form id="annotation-form">
+          <div class="form-section">
+            <h4>事件結論</h4>
+            <div class="decision-bar final-decision">
+              <span>最終判定</span>
+              <div class="segmented" id="final-decision-buttons"></div>
+              <input type="hidden" id="FinalDecision" name="FinalDecision">
+            </div>
+            <div class="form-grid three">
+              <label>可見類別
+                <select id="VisibleClass" name="VisibleClass"></select>
+              </label>
+              <label>空觸發原因
+                <select id="EmptyCause" name="EmptyCause"></select>
+              </label>
+              <label>重要物種
+                <select id="ImportantSpeciesFlag" name="ImportantSpeciesFlag"></select>
+              </label>
+            </div>
+          </div>
+
+          <div class="form-section taxon-section">
+            <h4>物種／分類階層</h4>
+            <div class="form-grid two preset-row">
+              <label>候選分類（僅提示）
+                <select id="taxon-preset"><option value="">— 自行輸入或保持空白 —</option></select>
+              </label>
+              <div class="taxon-guidance" id="taxon-guidance">選擇候選項目後，仍須人工確認影像證據。</div>
+            </div>
+            <div class="form-grid three">
+              <label>物種代碼
+                <input id="TaxonCode" name="TaxonCode" autocomplete="off">
+              </label>
+              <label>中文名
+                <input id="CommonName" name="CommonName" autocomplete="off">
+              </label>
+              <label>學名
+                <input id="ScientificName" name="ScientificName" autocomplete="off" class="scientific">
+              </label>
+              <label>最少數量
+                <input id="CountMin" name="CountMin" type="number" min="0" step="1">
+              </label>
+              <label>可視品質
+                <select id="Visibility" name="Visibility"></select>
+              </label>
+              <label>判讀信心
+                <select id="ReviewerConfidence" name="ReviewerConfidence"></select>
+              </label>
+            </div>
+          </div>
+
+          <div class="form-section workflow-section">
+            <h4>覆核流程</h4>
+            <div class="form-grid four">
+              <label>標註者
+                <input id="Annotator" name="Annotator" autocomplete="name">
+              </label>
+              <label>覆核狀態
+                <select id="ReviewStatus" name="ReviewStatus"></select>
+              </label>
+              <label>初判日期
+                <input id="FirstPassDate" name="FirstPassDate" type="date">
+              </label>
+              <label>第二標註者
+                <input id="SecondReviewer" name="SecondReviewer">
+              </label>
+              <label>複核日期
+                <input id="DoubleCheckDate" name="DoubleCheckDate" type="date">
+              </label>
+              <label>裁決者
+                <input id="Adjudicator" name="Adjudicator">
+              </label>
+              <label>裁決日期
+                <input id="AdjudicationDate" name="AdjudicationDate" type="date">
+              </label>
+            </div>
+            <label class="notes-label">備註
+              <textarea id="Notes" name="Notes" rows="4" placeholder="記錄鑑定依據、疑點、個體特徵或需要專家確認的原因…"></textarea>
+            </label>
+          </div>
+        </form>
+      </section>
+
+      <footer class="bottom-actions">
+        <button class="button ghost" id="bottom-previous" type="button">← 上一組</button>
+        <div>
+          <button class="button ghost" id="save-only-button" type="button">只儲存</button>
+          <button class="button primary" id="save-next-button" type="button">儲存並下一組 →</button>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <dialog id="image-dialog" class="image-dialog">
+    <button id="close-dialog" type="button" aria-label="關閉">×</button>
+    <img id="dialog-image" alt="放大照片">
+    <div id="dialog-caption"></div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

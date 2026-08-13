@@ -1,0 +1,20 @@
+{
+  "valid": true,
+  "quickCheck": "ok",
+  "timelapseVersionCompatibility": "2.5.0.7",
+  "backwardsCompatibility": "2.3.3.0",
+  "requiredTables": [
+    "FolderDataInfo",
+    "FolderDataTemplateTable",
+    "TemplateInfo",
+    "TemplateTable"
+  ],
+  "standardControls": 4,
+  "projectControls": 29,
+  "templateRows": 33,
+  "duplicateDataLabels": [],
+  "invalidChoiceJson": [],
+  "guiValidation": "not-run: Windows security blocked the installed Timelapse executable; antivirus was not disabled or bypassed",
+  "officialSchemaSource": "https://github.com/saulgreenberg/Timelapse/blob/develop/src/Timelapse/Database/CommonDatabase.cs",
+  "officialChoiceSource": "https://github.com/saulgreenberg/Timelapse/blob/develop/src/Timelapse/DataStructures/Choices.cs"
+}

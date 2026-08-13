@@ -1,0 +1,7 @@
+logs/
+server.pid
+node_modules/
+.env
+.env.*
+!.env.example
+

@@ -1,0 +1,114 @@
+[
+  {
+    "taxonCode": "ANIMAL_UNKNOWN",
+    "commonName": "未知動物",
+    "scientificName": "",
+    "rank": "unknown",
+    "status": "active",
+    "guidance": "影像不足以可靠判定時使用；不要硬猜物種。"
+  },
+  {
+    "taxonCode": "MURIDAE_SP",
+    "commonName": "鼠科未定種",
+    "scientificName": "Muridae sp.",
+    "rank": "family",
+    "status": "candidate",
+    "guidance": "只能確認鼠科、無法支持種級鑑定時使用。"
+  },
+  {
+    "taxonCode": "RODENTIA_SP",
+    "commonName": "齧齒目未定種",
+    "scientificName": "Rodentia sp.",
+    "rank": "order",
+    "status": "candidate",
+    "guidance": "只能確認齧齒目時使用。"
+  },
+  {
+    "taxonCode": "PRINIA_FLAVIVENTRIS",
+    "commonName": "灰頭鷦鶯",
+    "scientificName": "Prinia flaviventris",
+    "rank": "species",
+    "status": "candidate",
+    "guidance": "候選物種；仍須依本事件影像特徵人工確認。"
+  },
+  {
+    "taxonCode": "PRINIA_SP",
+    "commonName": "鷦鶯屬未定種",
+    "scientificName": "Prinia sp.",
+    "rank": "genus",
+    "status": "candidate",
+    "guidance": "能確認鷦鶯屬但物種證據不足時使用。"
+  },
+  {
+    "taxonCode": "HETEROPHASIA_AURICULARIS",
+    "commonName": "白耳畫眉",
+    "scientificName": "Heterophasia auricularis",
+    "rank": "species",
+    "status": "candidate",
+    "guidance": "候選物種；仍須依本事件影像特徵人工確認。"
+  },
+  {
+    "taxonCode": "COPSYCHUS_MALABARICUS",
+    "commonName": "白腰鵲鴝",
+    "scientificName": "Copsychus malabaricus",
+    "rank": "species",
+    "status": "candidate",
+    "guidance": "候選物種；仍須依本事件影像特徵人工確認。"
+  },
+  {
+    "taxonCode": "GARRULAX_TAEWANUS",
+    "commonName": "臺灣畫眉",
+    "scientificName": "Garrulax taewanus",
+    "rank": "species",
+    "status": "candidate",
+    "guidance": "需排除中國畫眉與疑似雜交表型。"
+  },
+  {
+    "taxonCode": "GARRULAX_CANORUS",
+    "commonName": "中國畫眉",
+    "scientificName": "Garrulax canorus",
+    "rank": "species",
+    "status": "candidate",
+    "guidance": "需排除臺灣畫眉與疑似雜交表型。"
+  },
+  {
+    "taxonCode": "HWAMEI_HYBRID_SUSPECTED",
+    "commonName": "畫眉疑似雜交表型",
+    "scientificName": "Garrulax taewanus × G. canorus (suspected)",
+    "rank": "hybrid_suspected",
+    "status": "candidate",
+    "guidance": "僅在表型支持但無法確認遺傳來源時使用，並將信心設為低。"
+  },
+  {
+    "taxonCode": "ALCIPPE_MORRISONIA",
+    "commonName": "繡眼畫眉",
+    "scientificName": "Alcippe morrisonia",
+    "rank": "species",
+    "status": "candidate",
+    "guidance": "候選物種；仍須依本事件影像特徵人工確認。"
+  },
+  {
+    "taxonCode": "HORORNIS_SP",
+    "commonName": "樹鶯屬未定種",
+    "scientificName": "Horornis sp.",
+    "rank": "genus",
+    "status": "candidate",
+    "guidance": "能確認樹鶯屬但物種證據不足時使用。"
+  },
+  {
+    "taxonCode": "MEL0GALE_MOSCHATA_CANDIDATE",
+    "commonName": "鼬獾（待專家確認）",
+    "scientificName": "Melogale moschata",
+    "rank": "species",
+    "status": "filename_hint_only",
+    "guidance": "目前部分檔名含此提示；檔名不是黃金標籤，必須看影像確認。"
+  },
+  {
+    "taxonCode": "PAGUMA_LARVATA_CANDIDATE",
+    "commonName": "白鼻心（待專家確認）",
+    "scientificName": "Paguma larvata",
+    "rank": "species",
+    "status": "filename_hint_only",
+    "guidance": "目前部分檔名含此提示；檔名不是黃金標籤，必須看影像確認。"
+  }
+]

@@ -1,0 +1,9 @@
+{
+  "appName": "野生動物事件判讀台",
+  "deploymentId": "CAM023-2026-08-A",
+  "port": 4173,
+  "manifestCsv": "D:\\CameraTrap_Gold_v1\\04_annotations\\CAM023-2026-08-A_gold_annotation_events_v1.0.csv",
+  "workingCsv": "D:\\CameraTrap_Gold_v1\\04_annotations\\CAM023-2026-08-A_gold_annotation_events_v1.0_working.csv",
+  "mediaRoot": "D:\\CameraTrap_Gold_v1\\01_annotation_working\\LOC001\\CAM023-2026-08-A",
+  "taxonomyJson": "taxonomy.json"
+}

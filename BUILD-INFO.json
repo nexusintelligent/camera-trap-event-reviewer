@@ -1,0 +1,32 @@
+{
+  "product": "野生動物事件判讀台",
+  "version": "1.0.0",
+  "buildDate": "2026-08-11",
+  "deploymentId": "CAM023-2026-08-A",
+  "eventCount": 154,
+  "mediaCount": 616,
+  "workflow": "event-based photo-first review with optional second-pass video",
+  "runtime": "Node.js built-in modules only",
+  "listenAddress": "127.0.0.1",
+  "automatedChecks": [
+    "JavaScript syntax",
+    "PowerShell syntax",
+    "154-event manifest load",
+    "real JPEG byte-range streaming",
+    "taxonomy load",
+    "annotation save",
+    "CSV export",
+    "path traversal rejection",
+    "immutable identifier rejection"
+  ],
+  "browserChecks": [
+    "three event photos rendered",
+    "filter and search",
+    "filename hint warning",
+    "second-pass video unlock",
+    "conservative taxonomy preset",
+    "save state and progress update",
+    "cross-event video reset",
+    "no browser console errors"
+  ]
+}
