@@ -45,8 +45,11 @@ const state = {
   dirty: false,
   saving: false,
   videoUnlocked: false,
+  serverAvailable: false,
   status: { total: 0, reviewed: 0, unreviewed: 0 },
 };
+
+let deferredInstallPrompt = null;
 
 const $ = (selector) => document.querySelector(selector);
 const eventList = $("#event-list");
@@ -81,6 +84,62 @@ function setDirty(dirty) {
   indicator.classList.toggle("dirty", dirty);
   indicator.classList.toggle("saved", !dirty && Boolean(state.currentId));
   indicator.lastChild.textContent = dirty ? "尚未儲存" : "已同步到工作檔";
+}
+
+function renderConnectionState() {
+  const banner = $("#offline-banner");
+  const online = navigator.onLine;
+  const connected = online && state.serverAvailable;
+  banner.hidden = connected;
+  document.body.classList.toggle("connection-warning", !connected);
+  $("#offline-title").textContent = online ? "本機服務尚未連線" : "目前處於離線狀態";
+  $("#offline-message").textContent = online
+    ? "請先啟動照片辨識軟體，再按「重新連線」。資料與影像不會儲存在 PWA 快取中。"
+    : "PWA 介面可離線開啟，但標註資料與相機影像需要本機服務。";
+}
+
+function initializePwa() {
+  const installButton = $("#install-app-button");
+  const standalone = window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+  installButton.hidden = true;
+
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("/service-worker.js", { scope: "/" }).catch((error) => {
+        console.error("Service worker registration failed", error);
+      });
+    });
+  }
+
+  window.addEventListener("beforeinstallprompt", (event) => {
+    event.preventDefault();
+    if (standalone) return;
+    deferredInstallPrompt = event;
+    installButton.hidden = false;
+  });
+
+  installButton.addEventListener("click", async () => {
+    if (!deferredInstallPrompt) {
+      showToast("請使用瀏覽器選單中的「安裝應用程式」或「新增至主畫面」。");
+      return;
+    }
+    deferredInstallPrompt.prompt();
+    const choice = await deferredInstallPrompt.userChoice;
+    deferredInstallPrompt = null;
+    installButton.hidden = true;
+    showToast(choice.outcome === "accepted" ? "應用程式安裝已開始。" : "已取消安裝。", choice.outcome !== "accepted");
+  });
+
+  window.addEventListener("appinstalled", () => {
+    deferredInstallPrompt = null;
+    installButton.hidden = true;
+    showToast("野生動物事件判讀台已安裝。");
+  });
+
+  window.addEventListener("online", renderConnectionState);
+  window.addEventListener("offline", renderConnectionState);
+  $("#retry-connection-button").addEventListener("click", () => window.location.reload());
+  renderConnectionState();
 }
 
 function localDate() {
@@ -491,6 +550,7 @@ function initializeControls() {
 
 async function start() {
   initializeControls();
+  initializePwa();
   try {
     const [configResponse, eventsResponse, taxonomyResponse] = await Promise.all([
       fetch("/api/config"), fetch("/api/events"), fetch("/api/taxonomy"),
@@ -501,6 +561,8 @@ async function start() {
     state.events = eventPayload.events;
     state.status = eventPayload.status;
     state.taxonomy = (await taxonomyResponse.json()).taxonomy;
+    state.serverAvailable = true;
+    renderConnectionState();
     $("#app-title").textContent = state.config.appName;
     document.title = `${state.config.appName} · ${state.config.deploymentId}`;
     renderStatus();
@@ -510,6 +572,8 @@ async function start() {
       renderCurrentEvent();
     }
   } catch (error) {
+    state.serverAvailable = false;
+    renderConnectionState();
     showToast(`${error.message} 請確認伺服器與 D 槽資料路徑。`, true);
     $("#event-id").textContent = "載入失敗";
   }

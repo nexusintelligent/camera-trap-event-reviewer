@@ -3,7 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#123f2f">
+  <meta name="description" content="以事件為單位進行相機陷阱照片與影片判讀、標註及品質覆核。">
+  <meta name="application-name" content="野生動物事件判讀台">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="事件判讀台">
   <title>野生動物事件判讀台</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/icon-180.png">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -16,11 +25,20 @@
       </div>
     </div>
     <div class="top-actions">
+      <button class="button ghost install-button" id="install-app-button" type="button" hidden>安裝應用程式</button>
       <div class="save-state" id="save-state"><span></span>尚未修改</div>
       <a class="button ghost" href="/api/export.csv">匯出目前 CSV</a>
       <button class="button primary" id="save-button" type="button">儲存 <kbd>Ctrl</kbd>+<kbd>S</kbd></button>
     </div>
   </header>
+
+  <div class="offline-banner" id="offline-banner" role="status" hidden>
+    <div>
+      <strong id="offline-title">目前無法連線</strong>
+      <span id="offline-message">請先啟動本機照片辨識服務，資料與影像不會儲存在 PWA 快取中。</span>
+    </div>
+    <button class="button ghost" id="retry-connection-button" type="button">重新連線</button>
+  </div>
 
   <div class="app-shell">
     <aside class="sidebar">

@@ -52,6 +52,7 @@ const MIME_TYPES = {
   ".mp4": "video/mp4",
   ".png": "image/png",
   ".svg": "image/svg+xml",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
 };
 
 let events = [];
@@ -180,7 +181,7 @@ async function readRequestBody(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
 }
 
-async function serveStatic(response, pathname) {
+async function serveStatic(request, response, pathname) {
   const relative = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
   const resolved = path.resolve(PUBLIC_ROOT, relative);
   const prefix = `${path.resolve(PUBLIC_ROOT)}${path.sep}`;
@@ -190,12 +191,14 @@ async function serveStatic(response, pathname) {
   }
   try {
     const body = await readFile(resolved);
-    response.writeHead(200, {
+    const headers = {
       "Content-Type": MIME_TYPES[path.extname(resolved).toLowerCase()] || "application/octet-stream",
       "Content-Length": body.length,
       "Cache-Control": "no-cache",
-    });
-    response.end(body);
+    };
+    if (pathname === "/service-worker.js") headers["Service-Worker-Allowed"] = "/";
+    response.writeHead(200, headers);
+    response.end(request.method === "HEAD" ? undefined : body);
   } catch (error) {
     textResponse(response, error.code === "ENOENT" ? 404 : 500, error.code === "ENOENT" ? "Not found" : "Server error");
   }
@@ -312,7 +315,7 @@ const server = http.createServer(async (request, response) => {
     } else if (request.method === "GET" && url.pathname.startsWith("/media/")) {
       await serveMedia(request, response, url.pathname.slice("/media/".length));
     } else if (request.method === "GET" || request.method === "HEAD") {
-      await serveStatic(response, url.pathname);
+      await serveStatic(request, response, url.pathname);
     } else {
       textResponse(response, 405, "Method not allowed");
     }

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="野生動物事件判讀台">
+  <rect width="512" height="512" rx="112" fill="#123f2f"/>
+  <path d="M0 374c91-54 157-37 230 4 80 44 151 48 282-20v154H0z" fill="#164a36"/>
+  <circle cx="404" cy="104" r="42" fill="#e6a445"/>
+  <path d="M145 172h66l20-37h85l20 37h39c32 0 58 26 58 58v144c0 32-26 58-58 58H137c-32 0-58-26-58-58V230c0-32 26-58 58-58z" fill="#f4f6f1"/>
+  <rect x="107" y="210" width="66" height="28" rx="14" fill="#dcebe1"/>
+  <circle cx="273" cy="289" r="86" fill="#123f2f"/>
+  <circle cx="273" cy="289" r="59" fill="#1f654a"/>
+  <circle cx="250" cy="267" r="17" fill="#dcebe1" opacity=".9"/>
+  <path d="M362 254h37v72h-37z" fill="#e6a445"/>
+</svg>

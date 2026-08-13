@@ -25,6 +25,7 @@ body {
 }
 button, input, select, textarea { font: inherit; }
 button, select { cursor: pointer; }
+[hidden] { display: none !important; }
 
 .topbar {
   position: sticky;
@@ -81,8 +82,28 @@ kbd { padding: 1px 4px; font-size: 10px; color: inherit; border: 1px solid curre
 .topbar .button.primary { background: #f2b55d; border-color: #f2b55d; color: #253129; }
 .button.ghost { color: inherit; background: transparent; border-color: #cbd5ce; }
 .topbar .button.ghost { border-color: rgba(255,255,255,.3); }
+.install-button { color: #ffe2b7 !important; }
 .button.warm { color: #6b3b00; background: var(--warm-soft); border-color: #efc57d; }
 .text-button { padding: 5px 0; color: var(--forest-2); border: 0; background: none; font-weight: 700; }
+
+.offline-banner {
+  position: sticky;
+  z-index: 29;
+  top: 79px;
+  min-height: 58px;
+  padding: 9px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  color: #5b3604;
+  background: #fff0d6;
+  border-bottom: 1px solid #e7c487;
+}
+.offline-banner > div { display: flex; flex-wrap: wrap; gap: 7px 12px; align-items: baseline; }
+.offline-banner span { font-size: 13px; }
+.offline-banner .button { min-height: 32px; padding: 5px 10px; border-color: #c89747; }
+body.connection-warning .sidebar { top: 137px; height: calc(100vh - 137px); }
 
 .app-shell { display: grid; grid-template-columns: 300px minmax(0, 1fr); min-height: calc(100vh - 79px); }
 .sidebar {
@@ -213,6 +234,7 @@ input:focus, select:focus, textarea:focus { border-color: #4a8c6b; box-shadow: 0
 }
 @media (max-width: 760px) {
   .topbar { position: relative; align-items: flex-start; flex-direction: column; }
+  .offline-banner { position: relative; top: 0; align-items: flex-start; flex-direction: column; padding: 12px; gap: 10px; }
   .top-actions { width: 100%; flex-wrap: wrap; }
   .save-state { margin-right: auto; }
   .app-shell { display: block; }

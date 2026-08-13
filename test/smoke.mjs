@@ -10,6 +10,39 @@ async function json(pathname, options) {
 }
 
 const checks = [];
+
+const pageResponse = await fetch(`${baseUrl}/`);
+const pageHtml = await pageResponse.text();
+assert.equal(pageResponse.status, 200);
+assert.match(pageHtml, /rel="manifest" href="\/manifest\.webmanifest"/);
+assert.match(pageHtml, /name="theme-color"/);
+checks.push("pwa:html-metadata");
+
+const manifestResponse = await fetch(`${baseUrl}/manifest.webmanifest`);
+assert.equal(manifestResponse.status, 200);
+assert.match(manifestResponse.headers.get("content-type") || "", /application\/manifest\+json/);
+const manifest = await manifestResponse.json();
+assert.equal(manifest.display, "standalone");
+assert.equal(manifest.start_url, "/");
+assert.ok(manifest.icons.some((icon) => icon.sizes === "192x192"));
+assert.ok(manifest.icons.some((icon) => icon.sizes === "512x512"));
+checks.push("pwa:manifest-installable");
+
+const serviceWorkerResponse = await fetch(`${baseUrl}/service-worker.js`);
+const serviceWorker = await serviceWorkerResponse.text();
+assert.equal(serviceWorkerResponse.status, 200);
+assert.match(serviceWorkerResponse.headers.get("content-type") || "", /javascript/);
+assert.match(serviceWorker, /caches\.open/);
+assert.match(serviceWorker, /\/api\//);
+checks.push("pwa:service-worker-shell-only");
+
+const iconResponse = await fetch(`${baseUrl}/icons/icon-192.png`);
+assert.equal(iconResponse.status, 200);
+assert.match(iconResponse.headers.get("content-type") || "", /image\/png/);
+const iconMagic = new Uint8Array(await iconResponse.arrayBuffer());
+assert.deepEqual([...iconMagic.slice(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+checks.push("pwa:icons");
+
 const health = await json("/api/health");
 assert.equal(health.response.status, 200);
 assert.equal(health.body.ok, true);

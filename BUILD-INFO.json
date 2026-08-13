@@ -1,7 +1,7 @@
 {
   "product": "野生動物事件判讀台",
-  "version": "1.0.0",
-  "buildDate": "2026-08-11",
+  "version": "1.1.0",
+  "buildDate": "2026-08-13",
   "deploymentId": "CAM023-2026-08-A",
   "eventCount": 154,
   "mediaCount": 616,
@@ -16,6 +16,8 @@
     "taxonomy load",
     "annotation save",
     "CSV export",
+    "PWA manifest and install icons",
+    "service worker shell-only cache policy",
     "path traversal rejection",
     "immutable identifier rejection"
   ],
