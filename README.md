@@ -21,6 +21,14 @@
 
 若要停止背景服務，雙擊 `停止照片辨識軟體.cmd`。
 
+## GitHub Pages 線上入口
+
+1. 先在存放相機影像與 CSV 的電腦上雙擊 `啟動照片辨識軟體.cmd`。
+2. 開啟 <https://nexusintelligent.github.io/camera-trap-event-reviewer/>。
+3. 第一次使用時，瀏覽器若詢問是否允許網站連線到本機裝置，請選擇允許。
+
+GitHub Pages 只提供介面與 PWA 安裝檔。事件清單、人工標註、照片及影片仍由 `http://127.0.0.1:4173` 的本機服務讀寫，不會上傳到 GitHub；因此沒有啟動本機服務時，網站會顯示「本機服務尚未連線」。
+
 ## 安裝為 PWA
 
 1. 先雙擊 `啟動照片辨識軟體.cmd`，並在 Chrome 或 Edge 開啟判讀台。

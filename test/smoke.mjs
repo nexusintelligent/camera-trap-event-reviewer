@@ -14,7 +14,7 @@ const checks = [];
 const pageResponse = await fetch(`${baseUrl}/`);
 const pageHtml = await pageResponse.text();
 assert.equal(pageResponse.status, 200);
-assert.match(pageHtml, /rel="manifest" href="\/manifest\.webmanifest"/);
+assert.match(pageHtml, /rel="manifest" href="\.\/manifest\.webmanifest"/);
 assert.match(pageHtml, /name="theme-color"/);
 checks.push("pwa:html-metadata");
 
@@ -23,7 +23,7 @@ assert.equal(manifestResponse.status, 200);
 assert.match(manifestResponse.headers.get("content-type") || "", /application\/manifest\+json/);
 const manifest = await manifestResponse.json();
 assert.equal(manifest.display, "standalone");
-assert.equal(manifest.start_url, "/");
+assert.equal(manifest.start_url, "./");
 assert.ok(manifest.icons.some((icon) => icon.sizes === "192x192"));
 assert.ok(manifest.icons.some((icon) => icon.sizes === "512x512"));
 checks.push("pwa:manifest-installable");
@@ -42,6 +42,20 @@ assert.match(iconResponse.headers.get("content-type") || "", /image\/png/);
 const iconMagic = new Uint8Array(await iconResponse.arrayBuffer());
 assert.deepEqual([...iconMagic.slice(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 checks.push("pwa:icons");
+
+const pagesOrigin = "https://nexusintelligent.github.io";
+const corsPreflight = await fetch(`${baseUrl}/api/events`, {
+  method: "OPTIONS",
+  headers: {
+    Origin: pagesOrigin,
+    "Access-Control-Request-Method": "GET",
+    "Access-Control-Request-Private-Network": "true",
+  },
+});
+assert.equal(corsPreflight.status, 204);
+assert.equal(corsPreflight.headers.get("access-control-allow-origin"), pagesOrigin);
+assert.equal(corsPreflight.headers.get("access-control-allow-private-network"), "true");
+checks.push("pages:local-service-cors");
 
 const health = await json("/api/health");
 assert.equal(health.response.status, 200);

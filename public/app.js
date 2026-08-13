@@ -51,6 +51,24 @@ const state = {
 
 let deferredInstallPrompt = null;
 
+const LOCAL_SERVICE_ORIGIN = "http://127.0.0.1:4173";
+const SERVICE_ORIGIN = window.location.hostname.endsWith("github.io")
+  ? LOCAL_SERVICE_ORIGIN
+  : window.location.origin;
+
+function serviceUrl(pathname) {
+  return new URL(String(pathname).replace(/^\/+/, ""), `${SERVICE_ORIGIN}/`).href;
+}
+
+function normalizeEvent(event) {
+  return {
+    ...event,
+    media: Object.fromEntries(
+      Object.entries(event.media || {}).map(([key, value]) => [key, value ? serviceUrl(value) : ""]),
+    ),
+  };
+}
+
 const $ = (selector) => document.querySelector(selector);
 const eventList = $("#event-list");
 const annotationForm = $("#annotation-form");
@@ -105,7 +123,7 @@ function initializePwa() {
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
-      navigator.serviceWorker.register("/service-worker.js", { scope: "/" }).catch((error) => {
+      navigator.serviceWorker.register("./service-worker.js", { scope: "./" }).catch((error) => {
         console.error("Service worker registration failed", error);
       });
     });
@@ -456,7 +474,7 @@ async function saveCurrent(goNext = false) {
   for (const button of [$("#save-button"), $("#save-only-button"), $("#save-next-button")]) button.disabled = true;
   $("#save-state").lastChild.textContent = "正在儲存…";
   try {
-    const response = await fetch("/api/annotations", {
+    const response = await fetch(serviceUrl("/api/annotations"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch),
@@ -464,7 +482,7 @@ async function saveCurrent(goNext = false) {
     const result = await response.json();
     if (!response.ok) throw new Error(result.errors?.join(" ") || result.detail || "儲存失敗。");
     const index = state.events.findIndex((event) => event.EventID === result.event.EventID);
-    state.events[index] = result.event;
+    state.events[index] = normalizeEvent(result.event);
     recalculateStatus();
     renderStatus();
     applyFilter();
@@ -551,14 +569,17 @@ function initializeControls() {
 async function start() {
   initializeControls();
   initializePwa();
+  $("#export-link").href = serviceUrl("/api/export.csv");
   try {
     const [configResponse, eventsResponse, taxonomyResponse] = await Promise.all([
-      fetch("/api/config"), fetch("/api/events"), fetch("/api/taxonomy"),
+      fetch(serviceUrl("/api/config")),
+      fetch(serviceUrl("/api/events")),
+      fetch(serviceUrl("/api/taxonomy")),
     ]);
     if (!configResponse.ok || !eventsResponse.ok || !taxonomyResponse.ok) throw new Error("無法讀取專案資料。");
     state.config = await configResponse.json();
     const eventPayload = await eventsResponse.json();
-    state.events = eventPayload.events;
+    state.events = eventPayload.events.map(normalizeEvent);
     state.status = eventPayload.status;
     state.taxonomy = (await taxonomyResponse.json()).taxonomy;
     state.serverAvailable = true;

@@ -60,6 +60,31 @@ let taxonomy = [];
 let knownMedia = new Set();
 let saveQueue = Promise.resolve();
 
+function isAllowedBrowserOrigin(origin) {
+  if (!origin) return false;
+  if (origin === "https://nexusintelligent.github.io") return true;
+  try {
+    const url = new URL(origin);
+    return url.protocol === "http:" && (url.hostname === "127.0.0.1" || url.hostname === "localhost");
+  } catch {
+    return false;
+  }
+}
+
+function applyCorsHeaders(request, response) {
+  const origin = request.headers.origin;
+  if (!isAllowedBrowserOrigin(origin)) return false;
+  response.setHeader("Access-Control-Allow-Origin", origin);
+  response.setHeader("Vary", "Origin");
+  response.setHeader("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
+  response.setHeader("Access-Control-Allow-Headers", "Content-Type, Range");
+  response.setHeader("Access-Control-Expose-Headers", "Accept-Ranges, Content-Disposition, Content-Range");
+  if (request.headers["access-control-request-private-network"] === "true") {
+    response.setHeader("Access-Control-Allow-Private-Network", "true");
+  }
+  return true;
+}
+
 function jsonResponse(response, statusCode, body) {
   const payload = JSON.stringify(body);
   response.writeHead(statusCode, {
@@ -272,7 +297,11 @@ function statusSummary() {
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host || "127.0.0.1"}`);
   try {
-    if (request.method === "GET" && url.pathname === "/api/health") {
+    const corsAllowed = applyCorsHeaders(request, response);
+    if (request.method === "OPTIONS") {
+      response.writeHead(corsAllowed ? 204 : 403, { "Content-Length": "0" });
+      response.end();
+    } else if (request.method === "GET" && url.pathname === "/api/health") {
       jsonResponse(response, 200, { ok: true, deploymentId: config.deploymentId, events: events.length });
     } else if (request.method === "GET" && url.pathname === "/api/config") {
       jsonResponse(response, 200, {
