@@ -16,6 +16,10 @@ const pageHtml = await pageResponse.text();
 assert.equal(pageResponse.status, 200);
 assert.match(pageHtml, /rel="manifest" href="\.\/manifest\.webmanifest"/);
 assert.match(pageHtml, /name="theme-color"/);
+assert.match(pageHtml, /id="import-dialog"/);
+assert.match(pageHtml, /id="human-label-options"/);
+assert.match(pageHtml, /id="ai-section"/);
+assert.match(pageHtml, /id="start-ai-button"/);
 checks.push("pwa:html-metadata");
 
 const manifestResponse = await fetch(`${baseUrl}/manifest.webmanifest`);
@@ -57,11 +61,41 @@ assert.equal(corsPreflight.headers.get("access-control-allow-origin"), pagesOrig
 assert.equal(corsPreflight.headers.get("access-control-allow-private-network"), "true");
 checks.push("pages:local-service-cors");
 
+const rejectedOrigin = await fetch(`${baseUrl}/api/annotations`, {
+  method: "POST",
+  headers: { Origin: "https://malicious.example", "Content-Type": "application/json" },
+  body: JSON.stringify({ EventID: "not-used" }),
+});
+assert.equal(rejectedOrigin.status, 403);
+checks.push("security:origin-rejected");
+
 const health = await json("/api/health");
 assert.equal(health.response.status, 200);
 assert.equal(health.body.ok, true);
 assert.equal(health.body.events, 154);
 checks.push("health:154-events");
+
+const configPayload = await json("/api/config");
+assert.equal(configPayload.response.status, 200);
+assert.equal(configPayload.body.schemaVersion, "2.0");
+assert.equal(typeof configPayload.body.inferenceAvailable, "boolean");
+assert.equal(typeof configPayload.body.aiRuntime?.status, "string");
+assert.ok(configPayload.body.auditLog);
+checks.push("config:v2-capabilities");
+
+const aiStatus = await json("/api/ai/status");
+assert.equal(aiStatus.response.status, 200);
+assert.equal(typeof aiStatus.body.runtime?.ready, "boolean");
+assert.ok(["READY", "NOT_INSTALLED", "BROKEN"].includes(aiStatus.body.runtime?.status));
+checks.push("ai:runtime-status");
+
+const invalidAiJob = await json("/api/ai/jobs", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ EventID: "DOES-NOT-EXIST" }),
+});
+assert.ok([400, 503].includes(invalidAiJob.response.status));
+checks.push("ai:invalid-job-rejected");
 
 const eventPayload = await json("/api/events");
 assert.equal(eventPayload.response.status, 200);
@@ -69,6 +103,9 @@ assert.equal(eventPayload.body.events.length, 154);
 const first = eventPayload.body.events[0];
 assert.ok(first.EventID);
 assert.ok(first.media.Photo1);
+assert.equal(first.SchemaVersion, "2.0");
+assert.ok(first.AIStatus);
+assert.equal(typeof first.HumanLabels, "string");
 checks.push("events:loaded");
 
 const taxonomyPayload = await json("/api/taxonomy");
@@ -94,6 +131,22 @@ const invalid = await json("/api/annotations", {
 assert.equal(invalid.response.status, 400);
 checks.push("security:immutable-field-blocked");
 
+const immutableAi = await json("/api/annotations", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ EventID: first.EventID, AIStatus: "AI_COMPLETE" }),
+});
+assert.equal(immutableAi.response.status, 400);
+checks.push("security:ai-fields-immutable");
+
+const invalidLabels = await json("/api/annotations", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ EventID: first.EventID, HumanLabels: "empty;animal" }),
+});
+assert.equal(invalidLabels.response.status, 400);
+checks.push("validation:exclusive-empty-label");
+
 if (allowWrite) {
   const saved = await json("/api/annotations", {
     method: "POST",
@@ -109,10 +162,17 @@ if (allowWrite) {
       ReviewStatus: "first_pass",
       FirstPassDate: "2026-08-11",
       Notes: "SMOKE_TEST_ONLY",
+      HumanLabels: "uncertain",
+      IndividualCountMax: "",
+      CorrectionReason: "自動寫入與稽核測試",
+      TaxonomyVersion: "taxonomy_v1.0",
     }),
   });
   assert.equal(saved.response.status, 200);
   assert.equal(saved.body.event.Notes, "SMOKE_TEST_ONLY");
+  assert.equal(saved.body.event.HumanLabels, "uncertain");
+  assert.equal(saved.body.event.SchemaVersion, "2.0");
+  assert.ok(saved.body.event.LastModifiedAt);
   const exportResponse = await fetch(`${baseUrl}/api/export.csv`);
   const csv = await exportResponse.text();
   assert.ok(csv.includes("SMOKE_TEST_ONLY"));

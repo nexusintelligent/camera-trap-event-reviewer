@@ -1,0 +1,2 @@
+megadetector==10.0.24
+speciesnet==5.0.5

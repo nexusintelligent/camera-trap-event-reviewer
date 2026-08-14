@@ -8,7 +8,7 @@ const DECISIONS = [
 ];
 
 const SELECT_OPTIONS = {
-  VisibleClass: [["", "— 請選擇 —"], ...DECISIONS],
+  VisibleClass: [["", "— 請選擇 —"], ...DECISIONS, ["mixed", "混合事件"]],
   EmptyCause: [
     ["", "— 不適用／未選 —"], ["wind_vegetation", "風／植被"],
     ["light_shadow", "光影"], ["rain_fog", "雨／霧"],
@@ -22,8 +22,12 @@ const SELECT_OPTIONS = {
   ],
   ReviewerConfidence: [["", "— 未選 —"], ["high", "高"], ["medium", "中"], ["low", "低"]],
   ReviewStatus: [
-    ["", "— 尚未覆核 —"], ["first_pass", "初判完成"],
-    ["double_checked", "雙人複核完成"], ["adjudicated", "裁決完成"],
+    ["", "— 尚未覆核 —"], ["AI_PENDING", "AI 待處理"], ["AI_RUNNING", "AI 處理中"],
+    ["AI_COMPLETE", "AI 已完成"], ["NEEDS_REVIEW", "需要人工覆核"],
+    ["HUMAN_CONFIRMED", "人工確認完成"], ["UNCERTAIN", "資訊不足／不確定"],
+    ["CONFLICT", "結果衝突"], ["FAILED", "處理失敗"],
+    ["first_pass", "舊版：初判完成"], ["double_checked", "舊版：雙人複核完成"],
+    ["adjudicated", "舊版：裁決完成"],
   ],
   VideoDecision: [["", "— 尚未判定 —"], ...DECISIONS],
   VideoAddsAnimal: [["", "— 尚未判定 —"], ["yes", "是"], ["no", "否"], ["not_applicable", "不適用"]],
@@ -34,6 +38,12 @@ const EDITABLE_FIELDS = [
   "EmptyCause", "TaxonCode", "CommonName", "ScientificName", "CountMin", "Visibility",
   "ReviewerConfidence", "ImportantSpeciesFlag", "Annotator", "ReviewStatus", "FirstPassDate",
   "SecondReviewer", "DoubleCheckDate", "Adjudicator", "AdjudicationDate", "Notes",
+  "HumanLabels", "IndividualCountMax", "AdditionalTaxonCodes", "CorrectionReason", "TaxonomyVersion",
+];
+
+const AI_RESULT_FIELDS = [
+  "AIStatus", "AIEventLabels", "AISpecies", "AIConfidence", "AIModelName",
+  "AIModelVersion", "AIProcessedAt", "AIError", "ReviewStatus",
 ];
 
 const state = {
@@ -46,6 +56,12 @@ const state = {
   saving: false,
   videoUnlocked: false,
   serverAvailable: false,
+  importFiles: [],
+  importPreviewUrls: [],
+  importJob: null,
+  aiJobId: null,
+  aiJobEventId: null,
+  aiPollTimer: null,
   status: { total: 0, reviewed: 0, unreviewed: 0 },
 };
 
@@ -61,8 +77,13 @@ function serviceUrl(pathname) {
 }
 
 function normalizeEvent(event) {
+  const humanLabels = event.HumanLabels || event.FinalDecision || "";
   return {
     ...event,
+    HumanLabels: humanLabels,
+    IndividualCountMax: event.IndividualCountMax || event.CountMin || "",
+    AIStatus: event.AIStatus || "AI_PENDING",
+    TaxonomyVersion: event.TaxonomyVersion || "taxonomy_v1.0",
     media: Object.fromEntries(
       Object.entries(event.media || {}).map(([key, value]) => [key, value ? serviceUrl(value) : ""]),
     ),
@@ -167,7 +188,8 @@ function localDate() {
 }
 
 function isReviewed(event) {
-  return Boolean(event.ReviewStatus || event.FinalDecision);
+  return ["HUMAN_CONFIRMED", "UNCERTAIN", "CONFLICT", "double_checked", "adjudicated"].includes(event.ReviewStatus)
+    || Boolean(event.FinalDecision && ["first_pass", "double_checked", "adjudicated"].includes(event.ReviewStatus));
 }
 
 function recalculateStatus() {
@@ -191,6 +213,9 @@ function applyFilter() {
       filter === "all"
       || (filter === "unreviewed" && !isReviewed(event))
       || (filter === "reviewed" && isReviewed(event))
+      || (filter === "ai_pending" && ["AI_PENDING", "AI_RUNNING"].includes(event.AIStatus))
+      || (filter === "needs_review" && event.ReviewStatus === "NEEDS_REVIEW")
+      || (filter === "conflict" && event.ReviewStatus === "CONFLICT")
       || (filter === "audit" && event.AuditRandom === "yes")
       || (filter === "challenge" && event.SamplingStratum === "challenge")
       || (filter === "night" && challenge.includes("night"))
@@ -307,6 +332,152 @@ function syncDecisionButtons(containerId, value) {
   }
 }
 
+function selectedHumanLabels() {
+  return $("#HumanLabels").value.split(";").filter(Boolean);
+}
+
+function setHumanLabels(labels, dirty = true) {
+  const unique = [...new Set(labels.filter(Boolean))];
+  const normalized = unique.includes("empty") ? ["empty"] : unique;
+  $("#HumanLabels").value = normalized.join(";");
+  const derived = normalized.length > 1 ? "mixed" : (normalized[0] || "");
+  $("#FinalDecision").value = derived;
+  $("#VisibleClass").value = derived;
+  for (const input of document.querySelectorAll('#human-label-options input[type="checkbox"]')) {
+    input.checked = normalized.includes(input.value);
+  }
+  if (dirty) setDirty(true);
+}
+
+function renderHumanLabelOptions() {
+  const container = $("#human-label-options");
+  container.replaceChildren();
+  for (const [value, label] of DECISIONS) {
+    const wrapper = document.createElement("label");
+    wrapper.className = "multi-label-option";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = value;
+    input.addEventListener("change", () => {
+      let labels = [...document.querySelectorAll('#human-label-options input:checked')].map((item) => item.value);
+      if (value === "empty" && input.checked) labels = ["empty"];
+      if (value !== "empty" && input.checked) labels = labels.filter((item) => item !== "empty");
+      setHumanLabels(labels);
+    });
+    const text = document.createElement("span");
+    text.textContent = label;
+    wrapper.append(input, text);
+    container.append(wrapper);
+  }
+}
+
+function renderAiResult(event) {
+  const aiStatus = event.AIStatus || "AI_PENDING";
+  const runtime = state.config?.aiRuntime;
+  const anyJobRunning = Boolean(state.aiJobId);
+  const running = ["AI_PENDING", "AI_RUNNING"].includes(aiStatus)
+    && anyJobRunning && state.aiJobEventId === event.EventID;
+  $("#ai-status").textContent = aiStatus;
+  $("#ai-status").dataset.status = aiStatus;
+  $("#ai-labels").textContent = event.AIEventLabels || "尚未辨識";
+  $("#ai-species").textContent = event.AISpecies || "—";
+  $("#ai-confidence").textContent = event.AIConfidence || "—";
+  $("#ai-model").textContent = [event.AIModelName, event.AIModelVersion].filter(Boolean).join(" · ") || "尚未接線";
+  $("#ai-runtime-label").textContent = runtime?.ready
+    ? `${runtime.detectorModel || "MegaDetector"} · SpeciesNet ${runtime.versions?.speciesnet || ""}`.trim()
+    : (runtime?.message || "本機 AI 環境尚未就緒");
+  const startButton = $("#start-ai-button");
+  startButton.disabled = !runtime?.ready || anyJobRunning;
+  startButton.textContent = running
+    ? "辨識執行中…"
+    : (anyJobRunning ? "另一事件辨識中…" : (aiStatus === "AI_COMPLETE" ? "重新辨識目前事件" : "開始辨識目前事件"));
+  const notice = $("#ai-notice");
+  notice.hidden = false;
+  if (!runtime?.ready) notice.textContent = runtime?.message || "請先安裝 MegaDetector／SpeciesNet。";
+  else if (aiStatus === "FAILED") notice.textContent = `上次辨識失敗：${event.AIError || "請查看工作紀錄"}`;
+  else if (running) notice.textContent = "本機正在執行 MegaDetector 與 SpeciesNet；可繼續查看其他事件。";
+  else if (anyJobRunning) notice.textContent = `事件 ${state.aiJobEventId} 正在辨識；完成後才能啟動下一個事件。`;
+  else if (aiStatus === "AI_COMPLETE") notice.textContent = "AI 原始結果已保存；請由人工判讀決定最終答案。";
+  else notice.textContent = "尚未辨識。第一次執行會下載官方模型權重，可能需要數分鐘。";
+}
+
+async function refreshAiFields(eventId) {
+  const response = await fetch(serviceUrl("/api/events"));
+  if (!response.ok) throw new Error("無法重新讀取 AI 結果。");
+  const payload = await response.json();
+  const remote = payload.events.find((event) => event.EventID === eventId);
+  const local = state.events.find((event) => event.EventID === eventId);
+  if (remote && local) {
+    for (const field of AI_RESULT_FIELDS) local[field] = remote[field] || "";
+    if (state.currentId === eventId) {
+      renderAiResult(local);
+      renderMetadata(local);
+    }
+  }
+  state.status = payload.status;
+  renderStatus();
+  renderEventList();
+}
+
+async function pollAiJob(jobId, eventId) {
+  clearTimeout(state.aiPollTimer);
+  try {
+    const response = await fetch(serviceUrl(`/api/ai/jobs/${encodeURIComponent(jobId)}`));
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "無法讀取 AI 工作狀態。");
+    const job = payload.job;
+    const log = $("#ai-job-log");
+    log.classList.toggle("hidden", !job.logTail);
+    log.textContent = [job.message, job.logTail].filter(Boolean).join("\n\n");
+    const local = state.events.find((event) => event.EventID === eventId);
+    if (local && ["AI_PENDING", "AI_RUNNING"].includes(job.status)) {
+      local.AIStatus = job.status;
+      if (state.currentId === eventId) renderAiResult(local);
+      state.aiPollTimer = setTimeout(() => pollAiJob(jobId, eventId), 2000);
+      return;
+    }
+    state.aiJobId = null;
+    state.aiJobEventId = null;
+    await refreshAiFields(eventId);
+    showToast(job.status === "AI_COMPLETE" ? "AI 辨識完成，請進行人工覆核。" : `AI 辨識失敗：${job.error || "請查看紀錄"}`, job.status !== "AI_COMPLETE");
+  } catch (error) {
+    state.aiJobId = null;
+    state.aiJobEventId = null;
+    showToast(error.message, true);
+    if (currentEvent()) renderAiResult(currentEvent());
+  }
+}
+
+async function startAiInference() {
+  const event = currentEvent();
+  if (!event || state.aiJobId) return;
+  if (state.dirty) {
+    showToast("請先儲存目前的人工標註，再啟動 AI 辨識。", true);
+    return;
+  }
+  const button = $("#start-ai-button");
+  button.disabled = true;
+  try {
+    const response = await fetch(serviceUrl("/api/ai/jobs"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ EventID: event.EventID }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "無法建立 AI 工作。");
+    state.aiJobId = payload.job.jobId;
+    state.aiJobEventId = event.EventID;
+    event.AIStatus = payload.job.status;
+    renderAiResult(event);
+    $("#ai-job-log").classList.remove("hidden");
+    $("#ai-job-log").textContent = payload.job.message;
+    pollAiJob(payload.job.jobId, event.EventID);
+  } catch (error) {
+    showToast(error.message, true);
+    renderAiResult(event);
+  }
+}
+
 function renderVideo(event) {
   state.videoUnlocked = false;
   const content = $("#video-content");
@@ -402,8 +573,9 @@ function setFormValues(event) {
     const element = document.getElementById(field);
     if (element) element.value = event[field] || "";
   }
+  $("#CountMin").value = event.CountMin || event.IndividualCountMax || "";
+  setHumanLabels((event.HumanLabels || event.FinalDecision || "").split(";").filter(Boolean), false);
   syncDecisionButtons("#photo-decision-buttons", event.PhotoOnlyDecision || "");
-  syncDecisionButtons("#final-decision-buttons", event.FinalDecision || "");
 }
 
 function renderCurrentEvent() {
@@ -417,6 +589,7 @@ function renderCurrentEvent() {
   renderMetadata(event);
   renderPhotos(event);
   renderVideo(event);
+  renderAiResult(event);
   renderFilenameHint(event);
   renderTaxonomy(event);
   setFormValues(event);
@@ -447,15 +620,21 @@ function collectPatch() {
     const element = document.getElementById(field);
     patch[field] = element ? element.value.trim() : (event[field] || "");
   }
+  patch.HumanLabels = selectedHumanLabels().join(";");
+  patch.AdditionalTaxonCodes = patch.AdditionalTaxonCodes.split(";").map((code) => code.trim()).filter(Boolean).join(";");
+  const labels = patch.HumanLabels.split(";").filter(Boolean);
+  patch.FinalDecision = labels.length > 1 ? "mixed" : (labels[0] || "");
+  patch.VisibleClass = patch.FinalDecision;
+  patch.CountMin = patch.IndividualCountMax;
   if (patch.PhotoOnlyDecision && !patch.FirstPassDate) {
     patch.FirstPassDate = localDate();
     $("#FirstPassDate").value = patch.FirstPassDate;
   }
   if (patch.PhotoOnlyDecision && !patch.ReviewStatus) {
-    patch.ReviewStatus = "first_pass";
+    patch.ReviewStatus = "NEEDS_REVIEW";
     $("#ReviewStatus").value = patch.ReviewStatus;
   }
-  if (patch.CountMin && !/^\d+$/.test(patch.CountMin)) throw new Error("最少數量必須是非負整數。");
+  if (patch.IndividualCountMax && !/^\d+$/.test(patch.IndividualCountMax)) throw new Error("同時可見最大個體數必須是非負整數。");
   return patch;
 }
 
@@ -468,7 +647,10 @@ async function saveCurrent(goNext = false) {
     showToast(error.message, true);
     return;
   }
-  if (patch.FinalDecision === "animal" && !patch.TaxonCode && !window.confirm("最終判定為動物，但物種代碼仍空白。若確實無法判定，可先選擇 ANIMAL_UNKNOWN。仍要儲存嗎？")) return;
+  if (patch.HumanLabels.split(";").includes("animal") && !patch.TaxonCode) {
+    showToast("動物事件必須選擇物種；無法判斷時使用 ANIMAL_UNKNOWN。", true);
+    return;
+  }
 
   state.saving = true;
   for (const button of [$("#save-button"), $("#save-only-button"), $("#save-next-button")]) button.disabled = true;
@@ -507,13 +689,158 @@ function openImage(source, caption) {
   $("#image-dialog").showModal();
 }
 
+const ACCEPTED_MEDIA_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "avi", "mp4", "mov"]);
+
+function fileExtension(filename) {
+  return filename.toLocaleLowerCase().split(".").pop() || "";
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && value >= 1024; index += 1) {
+    value /= 1024;
+    unit = units[index];
+  }
+  return `${value.toFixed(value >= 10 ? 1 : 2)} ${unit}`;
+}
+
+async function sha256File(file) {
+  if (!globalThis.crypto?.subtle) return "UNAVAILABLE";
+  const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function clearImportPreviews() {
+  for (const url of state.importPreviewUrls) URL.revokeObjectURL(url);
+  state.importPreviewUrls = [];
+  $("#import-preview").replaceChildren();
+}
+
+function renderImportPreview() {
+  clearImportPreviews();
+  const preview = $("#import-preview");
+  for (const item of state.importFiles.slice(0, 12)) {
+    const card = document.createElement("article");
+    card.className = "import-file-card";
+    if (item.file.type.startsWith("image/")) {
+      const url = URL.createObjectURL(item.file);
+      state.importPreviewUrls.push(url);
+      const image = document.createElement("img");
+      image.src = url;
+      image.alt = item.relativePath;
+      card.append(image);
+    } else {
+      const mediaType = document.createElement("div");
+      mediaType.className = "media-type-icon";
+      mediaType.textContent = "VIDEO";
+      card.append(mediaType);
+    }
+    const name = document.createElement("strong");
+    name.textContent = item.relativePath;
+    const detail = document.createElement("span");
+    detail.textContent = `${formatBytes(item.file.size)} · SHA-256 ${item.sha256.slice(0, 12)}…`;
+    card.append(name, detail);
+    preview.append(card);
+  }
+  if (state.importFiles.length > 12) {
+    const more = document.createElement("div");
+    more.className = "import-more";
+    more.textContent = `另有 ${state.importFiles.length - 12} 個檔案已完成檢查`;
+    preview.append(more);
+  }
+}
+
+async function handleImportFiles(fileList) {
+  const candidates = [...fileList]
+    .filter((file) => ACCEPTED_MEDIA_EXTENSIONS.has(fileExtension(file.name)))
+    .filter((file, index, all) => {
+      const key = `${file.webkitRelativePath || file.name}:${file.size}:${file.lastModified}`;
+      return all.findIndex((candidate) => `${candidate.webkitRelativePath || candidate.name}:${candidate.size}:${candidate.lastModified}` === key) === index;
+    });
+  state.importFiles = [];
+  state.importJob = null;
+  $("#job-result").hidden = true;
+  $("#prepare-job-button").disabled = true;
+  if (!candidates.length) {
+    $("#import-summary").textContent = "沒有可接受的照片或影片。";
+    clearImportPreviews();
+    return;
+  }
+  const progress = $("#hash-progress");
+  progress.hidden = false;
+  progress.max = candidates.length;
+  progress.value = 0;
+  for (const file of candidates) {
+    $("#import-summary").textContent = `正在計算檔案雜湊 ${progress.value + 1} / ${candidates.length}…`;
+    state.importFiles.push({
+      file,
+      relativePath: file.webkitRelativePath || file.name,
+      sha256: await sha256File(file),
+    });
+    progress.value += 1;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  progress.hidden = true;
+  const totalBytes = state.importFiles.reduce((sum, item) => sum + item.file.size, 0);
+  const folders = new Set(state.importFiles.map((item) => item.relativePath.includes("/") ? item.relativePath.split("/")[0] : "單檔選取"));
+  $("#import-summary").textContent = `已檢查 ${state.importFiles.length} 個檔案 · ${folders.size} 個來源 · ${formatBytes(totalBytes)} · 原始檔唯讀`;
+  $("#prepare-job-button").disabled = false;
+  renderImportPreview();
+}
+
+function prepareImportJob() {
+  if (!state.importFiles.length) return;
+  const job = {
+    jobId: `CAMTRAP-${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}`,
+    schemaVersion: "2.0",
+    status: "IMPORT_READY",
+    pairingStatus: "PENDING",
+    createdAt: new Date().toISOString(),
+    inferenceEngine: null,
+    mediaCount: state.importFiles.length,
+    totalBytes: state.importFiles.reduce((sum, item) => sum + item.file.size, 0),
+    media: state.importFiles.map((item) => ({
+      relativePath: item.relativePath,
+      filename: item.file.name,
+      size: item.file.size,
+      mimeType: item.file.type || "application/octet-stream",
+      lastModified: new Date(item.file.lastModified).toISOString(),
+      sha256: item.sha256,
+    })),
+  };
+  state.importJob = job;
+  sessionStorage.setItem("cameraTrapPendingJob", JSON.stringify({
+    jobId: job.jobId,
+    schemaVersion: job.schemaVersion,
+    status: job.status,
+    pairingStatus: job.pairingStatus,
+    createdAt: job.createdAt,
+    mediaCount: job.mediaCount,
+    totalBytes: job.totalBytes,
+  }));
+  const result = $("#job-result");
+  result.hidden = false;
+  result.textContent = JSON.stringify({
+    jobId: job.jobId,
+    status: job.status,
+    pairingStatus: job.pairingStatus,
+    mediaCount: job.mediaCount,
+    totalSize: formatBytes(job.totalBytes),
+    nextStep: "將媒體登錄成事件後，再由事件頁執行 MegaDetector／SpeciesNet",
+  }, null, 2);
+  showToast(`${job.jobId} 的本機匯入清單已建立`);
+}
+
 function initializeControls() {
   for (const [id, options] of Object.entries(SELECT_OPTIONS)) {
     const element = document.getElementById(id);
     if (element) optionSelect(element, options);
   }
   renderDecisionButtons("#photo-decision-buttons", "PhotoOnlyDecision");
-  renderDecisionButtons("#final-decision-buttons", "FinalDecision");
+  renderHumanLabelOptions();
 
   annotationForm.addEventListener("input", () => setDirty(true));
   annotationForm.addEventListener("change", () => setDirty(true));
@@ -532,10 +859,7 @@ function initializeControls() {
   $("#copy-photo-decision").addEventListener("click", () => {
     const value = $("#PhotoOnlyDecision").value;
     if (!value) return showToast("請先完成照片判定。", true);
-    $("#FinalDecision").value = value;
-    $("#VisibleClass").value = value;
-    syncDecisionButtons("#final-decision-buttons", value);
-    setDirty(true);
+    setHumanLabels([value]);
   });
   $("#unlock-video-button").addEventListener("click", unlockVideo);
   $("#previous-button").addEventListener("click", () => navigate(-1));
@@ -550,6 +874,42 @@ function initializeControls() {
   $("#image-dialog").addEventListener("click", (event) => {
     if (event.target === $("#image-dialog")) $("#image-dialog").close();
   });
+  $("#open-import-button").addEventListener("click", () => $("#import-dialog").showModal());
+  $("#close-import-dialog").addEventListener("click", () => $("#import-dialog").close());
+  $("#choose-photos-button").addEventListener("click", (event) => {
+    event.stopPropagation();
+    $("#photo-picker").click();
+  });
+  $("#choose-folder-button").addEventListener("click", (event) => {
+    event.stopPropagation();
+    $("#folder-picker").click();
+  });
+  $("#photo-picker").addEventListener("change", (event) => handleImportFiles(event.target.files));
+  $("#folder-picker").addEventListener("change", (event) => handleImportFiles(event.target.files));
+  $("#drop-zone").addEventListener("click", (event) => {
+    if (event.target === $("#drop-zone") || event.target.closest("strong, span")) $("#photo-picker").click();
+  });
+  $("#drop-zone").addEventListener("keydown", (event) => {
+    if (["Enter", " "].includes(event.key)) {
+      event.preventDefault();
+      $("#photo-picker").click();
+    }
+  });
+  for (const eventName of ["dragenter", "dragover"]) {
+    $("#drop-zone").addEventListener(eventName, (event) => {
+      event.preventDefault();
+      $("#drop-zone").classList.add("dragging");
+    });
+  }
+  for (const eventName of ["dragleave", "drop"]) {
+    $("#drop-zone").addEventListener(eventName, (event) => {
+      event.preventDefault();
+      $("#drop-zone").classList.remove("dragging");
+    });
+  }
+  $("#drop-zone").addEventListener("drop", (event) => handleImportFiles(event.dataTransfer.files));
+  $("#prepare-job-button").addEventListener("click", prepareImportJob);
+  $("#start-ai-button").addEventListener("click", startAiInference);
 
   window.addEventListener("beforeunload", (event) => {
     if (state.dirty) event.preventDefault();

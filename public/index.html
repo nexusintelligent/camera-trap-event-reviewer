@@ -25,6 +25,7 @@
       </div>
     </div>
     <div class="top-actions">
+      <button class="button ghost" id="open-import-button" type="button">匯入媒體</button>
       <button class="button ghost install-button" id="install-app-button" type="button" hidden>安裝應用程式</button>
       <div class="save-state" id="save-state"><span></span>尚未修改</div>
       <a class="button ghost" id="export-link" href="#">匯出目前 CSV</a>
@@ -58,6 +59,9 @@
             <option value="all">全部事件</option>
             <option value="unreviewed">尚未覆核</option>
             <option value="reviewed">已覆核</option>
+            <option value="ai_pending">AI 待處理</option>
+            <option value="needs_review">需要人工覆核</option>
+            <option value="conflict">AI／人工衝突</option>
             <option value="audit">隨機稽核</option>
             <option value="challenge">挑戰樣本</option>
             <option value="night">夜間樣本</option>
@@ -123,6 +127,34 @@
         </div>
       </section>
 
+      <section class="ai-section card" id="ai-section">
+        <div class="section-head">
+          <div>
+            <span class="step-number ai">AI</span>
+            <div>
+              <h3>AI 原始結果</h3>
+              <p>唯讀保存模型原始輸出；人工答案會另存，不會覆蓋模型結果。</p>
+            </div>
+          </div>
+          <span class="status-pill" id="ai-status">AI_PENDING</span>
+        </div>
+        <div class="ai-result-grid">
+          <div><span>事件類別</span><strong id="ai-labels">尚未辨識</strong></div>
+          <div><span>物種候選</span><strong id="ai-species">—</strong></div>
+          <div><span>信心</span><strong id="ai-confidence">—</strong></div>
+          <div><span>模型版本</span><strong id="ai-model">尚未接線</strong></div>
+        </div>
+        <div class="ai-controls">
+          <div>
+            <strong id="ai-runtime-label">正在檢查本機 AI 環境…</strong>
+            <span>模型只在本機處理媒體；第一次執行需要下載官方權重。</span>
+          </div>
+          <button class="button primary" id="start-ai-button" type="button" disabled>開始辨識目前事件</button>
+        </div>
+        <div class="ai-notice" id="ai-notice">正在檢查 MegaDetector／SpeciesNet 執行環境。</div>
+        <pre class="ai-job-log hidden" id="ai-job-log" aria-live="polite"></pre>
+      </section>
+
       <section class="annotation-section card">
         <div class="section-head">
           <div>
@@ -144,9 +176,13 @@
         <form id="annotation-form">
           <div class="form-section">
             <h4>事件結論</h4>
-            <div class="decision-bar final-decision">
-              <span>最終判定</span>
-              <div class="segmented" id="final-decision-buttons"></div>
+            <div class="multi-label-block">
+              <div>
+                <strong>人工最終類別（可多選）</strong>
+                <span>`empty` 不可與其他類別並存；兩種以上類別會自動記為 `mixed`。</span>
+              </div>
+              <div class="multi-label-options" id="human-label-options"></div>
+              <input type="hidden" id="HumanLabels" name="HumanLabels">
               <input type="hidden" id="FinalDecision" name="FinalDecision">
             </div>
             <div class="form-grid three">
@@ -180,14 +216,21 @@
               <label>學名
                 <input id="ScientificName" name="ScientificName" autocomplete="off" class="scientific">
               </label>
-              <label>最少數量
-                <input id="CountMin" name="CountMin" type="number" min="0" step="1">
+              <label>同時可見最大個體數
+                <input id="IndividualCountMax" name="IndividualCountMax" type="number" min="0" step="1">
+                <input id="CountMin" name="CountMin" type="hidden">
               </label>
               <label>可視品質
                 <select id="Visibility" name="Visibility"></select>
               </label>
               <label>判讀信心
                 <select id="ReviewerConfidence" name="ReviewerConfidence"></select>
+              </label>
+              <label>其他物種代碼
+                <input id="AdditionalTaxonCodes" name="AdditionalTaxonCodes" placeholder="以分號分隔，例如 TAXON_A;TAXON_B">
+              </label>
+              <label>物種名錄版本
+                <input id="TaxonomyVersion" name="TaxonomyVersion" value="taxonomy_v1.0">
               </label>
             </div>
           </div>
@@ -220,6 +263,9 @@
             <label class="notes-label">備註
               <textarea id="Notes" name="Notes" rows="4" placeholder="記錄鑑定依據、疑點、個體特徵或需要專家確認的原因…"></textarea>
             </label>
+            <label class="notes-label">修改／更正原因
+              <textarea id="CorrectionReason" name="CorrectionReason" rows="2" placeholder="若人工答案修正 AI 或前一位標註者，請記錄原因…"></textarea>
+            </label>
           </div>
         </form>
       </section>
@@ -238,6 +284,35 @@
     <button id="close-dialog" type="button" aria-label="關閉">×</button>
     <img id="dialog-image" alt="放大照片">
     <div id="dialog-caption"></div>
+  </dialog>
+
+  <dialog id="import-dialog" class="import-dialog">
+    <div class="dialog-head">
+      <div>
+        <div class="eyebrow">LOCAL MEDIA · V2</div>
+        <h2>建立待辨識工作</h2>
+      </div>
+      <button id="close-import-dialog" type="button" aria-label="關閉">×</button>
+    </div>
+    <p class="import-intro">由你主動選擇照片、影片或整個資料夾。瀏覽器不會取得完整磁碟路徑，也不會修改原始媒體。</p>
+    <input id="photo-picker" type="file" accept=".jpg,.jpeg,.png,.webp,.avi,.mp4,.mov" multiple hidden>
+    <input id="folder-picker" type="file" accept=".jpg,.jpeg,.png,.webp,.avi,.mp4,.mov" webkitdirectory directory multiple hidden>
+    <div class="drop-zone" id="drop-zone" tabindex="0" role="button" aria-label="拖放媒體或開啟檔案選擇">
+      <strong>將照片或事件資料夾拖曳到這裡</strong>
+      <span>支援 JPG、PNG、WEBP、AVI、MP4、MOV</span>
+      <div>
+        <button class="button primary" id="choose-photos-button" type="button">選擇照片／影片</button>
+        <button class="button ghost" id="choose-folder-button" type="button">選擇整個資料夾</button>
+      </div>
+    </div>
+    <div class="import-summary" id="import-summary">尚未選擇檔案</div>
+    <progress id="hash-progress" max="1" value="0" hidden></progress>
+    <div class="import-preview" id="import-preview"></div>
+    <div class="import-actions">
+      <span>匯入清單只保存在本次瀏覽器工作階段；目前 AI 按鈕辨識的是已登錄事件。</span>
+      <button class="button primary" id="prepare-job-button" type="button" disabled>建立本機匯入清單</button>
+    </div>
+    <pre class="job-result" id="job-result" hidden></pre>
   </dialog>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>

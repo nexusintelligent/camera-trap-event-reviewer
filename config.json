@@ -4,6 +4,19 @@
   "port": 4173,
   "manifestCsv": "D:\\CameraTrap_Gold_v1\\04_annotations\\CAM023-2026-08-A_gold_annotation_events_v1.0.csv",
   "workingCsv": "D:\\CameraTrap_Gold_v1\\04_annotations\\CAM023-2026-08-A_gold_annotation_events_v1.0_working.csv",
+  "auditLog": "D:\\CameraTrap_Gold_v1\\04_annotations\\CAM023-2026-08-A_annotation_audit_v2.0.jsonl",
   "mediaRoot": "D:\\CameraTrap_Gold_v1\\01_annotation_working\\LOC001\\CAM023-2026-08-A",
-  "taxonomyJson": "taxonomy.json"
+  "taxonomyJson": "taxonomy.json",
+  "ai": {
+    "pythonPath": "%LOCALAPPDATA%\\CameraTrapReviewer\\Python311\\python.exe",
+    "modelCacheRoot": "%LOCALAPPDATA%\\CameraTrapReviewer\\model-cache",
+    "jobsRoot": "D:\\CameraTrap_Gold_v1\\04_annotations\\ai_jobs_v2",
+    "country": "TWN",
+    "detectorModel": "MDv1000-redwood",
+    "megadetectorVersion": "10.0.24",
+    "speciesnetVersion": "5.0.5",
+    "detectionThresholdForClassification": 0.15,
+    "detectionThresholdForOutput": 0.01,
+    "timeSampleSeconds": 1
+  }
 }

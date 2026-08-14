@@ -1,77 +1,81 @@
-# 野生動物事件判讀台 v1.1
+# 野生動物事件判讀台 v2.1
 
-這是 `CAM023-2026-08-A` 的本機第一版照片辨識／人工覆核軟體。它把同一次觸發的三張照片與一段影片組成單一事件，讓標註者先做照片判讀，再視需要開啟影片第二輪，最後輸出可供模型訓練與品質稽核的 CSV。
+這是 `CAM023-2026-08-A` 的事件級照片／影片判讀工具。每個事件包含三張照片與一段影片，網站將 AI 原始結果與人工最終答案分開保存，支援多標籤、保守分類、稽核紀錄及 CSV 匯出。
 
-## 立即使用
+## 啟動與使用
 
-1. 雙擊 `啟動照片辨識軟體.cmd`。
-2. 瀏覽器會開啟 `http://127.0.0.1:4173/`。
-3. 每個事件先看三張照片並填「照片判定」。
-4. 完成第一輪後才按「啟用影片第二輪」。
-5. 填寫最終判定、物種／分類階層、信心與覆核資訊。
+1. 第一次使用 AI 時，雙擊 `安裝AI辨識環境.cmd`。腳本會在使用者的 `%LOCALAPPDATA%\CameraTrapReviewer` 建立 Python 3.11 執行環境，並安裝固定版本的 MegaDetector 與 SpeciesNet。
+2. 雙擊 `啟動照片辨識軟體.cmd`。
+3. 瀏覽器開啟 `http://127.0.0.1:4173/`。
+4. 選擇事件後，按「執行 MegaDetector + SpeciesNet」。第一次辨識會下載官方模型權重，因此時間較久。
+5. 檢視三張照片與影片，再填寫人工事件標籤、物種、最大同時可見數、信心與複核資訊。
 6. 按「儲存」或 `Ctrl+S`。
 
-工作結果寫到：
+AI 任務的原始 JSON 與執行紀錄預設保存於：
+
+`D:\CameraTrap_Gold_v1\04_annotations\ai_jobs_v2`
+
+SpeciesNet 模型權重快取於 `%LOCALAPPDATA%\CameraTrapReviewer\model-cache`，不會提交到 GitHub。
+
+人工工作成果保存於：
 
 `D:\CameraTrap_Gold_v1\04_annotations\CAM023-2026-08-A_gold_annotation_events_v1.0_working.csv`
 
-每次覆寫前會保留上一版：
+每次覆寫前會建立 `.backup.csv`，人工變更另寫入 JSONL 稽核紀錄。媒體優先以硬連結或唯讀連結送入 AI 工作目錄；跨磁碟或權限不允許時才建立工作副本。流程不會重新命名、移動或刪除原始檔。
 
-`CAM023-2026-08-A_gold_annotation_events_v1.0_working.csv.backup.csv`
+## AI 流程
 
-若要停止背景服務，雙擊 `停止照片辨識軟體.cmd`。
+目前固定版本與預設值：
 
-## GitHub Pages 線上入口
+- MegaDetector `10.0.24`，模型 `MDv1000-redwood`。
+- SpeciesNet `5.0.5`，地區提示 `TWN`。
+- 偵測分類門檻 `0.15`，結果輸出門檻 `0.01`。
+- 影片每 `1` 秒取樣一次。
 
-1. 先在存放相機影像與 CSV 的電腦上雙擊 `啟動照片辨識軟體.cmd`。
-2. 開啟 <https://nexusintelligent.github.io/camera-trap-event-reviewer/>。
-3. 第一次使用時，瀏覽器若詢問是否允許網站連線到本機裝置，請選擇允許。
+流程為：MegaDetector 先辨識 `animal`、`person`、`vehicle` 與位置框；動物位置框再交給 SpeciesNet 做物種分類；最後彙整成事件級 AI 標籤。若 AI 與既有人工標籤不一致，事件標為 `CONFLICT`，但不會覆寫人工答案。
 
-GitHub Pages 只提供介面與 PWA 安裝檔。事件清單、人工標註、照片及影片仍由 `http://127.0.0.1:4173` 的本機服務讀寫，不會上傳到 GitHub；因此沒有啟動本機服務時，網站會顯示「本機服務尚未連線」。
+AI 狀態使用 `AI_PENDING`、`AI_RUNNING`、`AI_COMPLETE` 與 `FAILED`。人工複核狀態使用 `NEEDS_REVIEW`、`HUMAN_CONFIRMED`、`UNCERTAIN`、`CONFLICT` 等值。
 
-## 安裝為 PWA
+官方專案與用法：
 
-1. 先雙擊 `啟動照片辨識軟體.cmd`，並在 Chrome 或 Edge 開啟判讀台。
-2. 首頁右上角出現「安裝應用程式」時按下它；也可使用瀏覽器網址列的安裝圖示。
-3. 安裝後可從 Windows 開始功能表或桌面捷徑啟動，介面會以獨立視窗顯示。
+- [MegaDetector](https://github.com/agentmorris/MegaDetector)
+- [SpeciesNet](https://github.com/google/cameratrapai)
+- [MegaDetector + SpeciesNet 指令文件](https://megadetector.readthedocs.io/en/latest/detection.html#module-megadetector.detection.run_md_and_speciesnet)
 
-PWA 只快取介面、樣式與圖示，不會快取標註資料、照片或影片。每次工作前仍需先啟動本機 Node.js 服務；若服務未啟動，PWA 會顯示重新連線提示。這個設計可避免離線快取與最新 CSV 工作檔不一致，也不會把相機影像複製到瀏覽器快取。
+## 本機網站與 GitHub Pages
 
-## v1 的定位
+[GitHub Pages](https://nexusintelligent.github.io/camera-trap-event-reviewer/) 提供可安裝的 PWA 外殼。因瀏覽器安全限制及 AI 模型大小，媒體、CSV 與 AI 推論仍由本機 `127.0.0.1:4173` 服務處理；Pages 網站會連線到使用者自行啟動的本機服務。資料不會自動上傳到 GitHub。
 
-v1 是「事件式判讀與標註工具」，不是已訓練完成的自動物種模型。現有資料還沒有足夠的專家黃金標籤，直接聲稱能自動辨識物種會造成假精準。這一版先確保：
+若瀏覽器保留舊版畫面，請按 `Ctrl+F5` 強制重新整理，或在瀏覽器的應用程式設定中移除舊版 PWA 後重新安裝。
 
-- 三張照片以事件為單位一起看，降低單張誤判。
-- 照片與影片判定分開記錄，能量化影片新增資訊的比例。
-- 支援 `ANIMAL_UNKNOWN`、`Muridae sp.`、`Prinia sp.` 等保守分類。
-- 檔名提示只顯示為未驗證線索，不會自動寫入答案。
-- 只監聽本機 `127.0.0.1`，不會上傳影像。
-- 匯出欄位與 Timelapse 範本／黃金標註表一致。
+## PWA 安裝
 
-完成足夠的雙人覆核標籤後，下一版才適合加入模型推論、信心門檻、批次建議與錯誤分析。
-
-## Timelapse 相容檔
-
-本專案的 Timelapse 範本位於：
-
-`D:\CameraTrap_Gold_v1\04_annotations\CAM023-2026-08-A_gold_template_v1.0.tdb`
-
-它依 Timelapse 官方 `TemplateTable`、`FolderDataTemplateTable`、`FolderDataInfo`、`TemplateInfo` 結構建立，包含 4 個標準控制列與 29 個專案欄位。由於目前 Windows 安全機制攔截本機 Timelapse 執行檔，這個檔案已做 SQLite 結構驗證，但尚未在 Template Editor GUI 內開啟驗證。不要為此停用防毒；可由系統管理員確認官方安裝檔後再解除封鎖。
-
-官方參考：
-
-- https://timelapse.ucalgary.ca/
-- https://timelapse.ucalgary.ca/guides/
-- https://github.com/saulgreenberg/Timelapse
+用 Chrome 或 Edge 開啟網站後，使用網址列的安裝圖示或瀏覽器選單「安裝應用程式」。PWA 可以快取操作介面，但不會快取相機陷阱媒體、CSV 或 API 回應；本機服務停止時仍無法讀取事件資料或執行 AI。
 
 ## 設定
 
-預設路徑與連接埠在 `config.json`。也可在啟動前用以下環境變數覆寫：
+主要設定在 `config.json`，也可用環境變數覆寫：
 
 - `CAMTRAP_PORT`
 - `CAMTRAP_MANIFEST_CSV`
 - `CAMTRAP_WORKING_CSV`
+- `CAMTRAP_AUDIT_LOG`
 - `CAMTRAP_MEDIA_ROOT`
 - `CAMTRAP_TAXONOMY_JSON`
+- `CAMTRAP_AI_PYTHON`
+- `CAMTRAP_AI_MODEL_CACHE`
+- `CAMTRAP_AI_JOBS_ROOT`
+- `CAMTRAP_AI_COUNTRY`
+- `CAMTRAP_AI_DETECTOR_MODEL`
 
-伺服器只使用 Node.js 內建模組，不需安裝 npm 套件。
+網站後端只使用 Node.js 內建模組，不需執行 `npm install`。AI 是獨立的 Python 3.11 環境。
+
+## 測試
+
+啟動服務後執行：
+
+```powershell
+npm run smoke
+```
+
+測試包含 PWA、154 事件載入、媒體串流、路徑防護、AI 狀態／任務 API、不可由瀏覽器覆寫 AI 欄位、人工標註驗證與匯出功能。

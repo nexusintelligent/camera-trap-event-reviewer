@@ -1,7 +1,12 @@
 logs/
 server.pid
 node_modules/
+.venv-ai*/
+.python311/
+.pip-cache/
+ai_jobs/
+*.pt
+*.pth
 .env
 .env.*
 !.env.example
-
