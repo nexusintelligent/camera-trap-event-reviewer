@@ -152,6 +152,10 @@ body.connection-warning .sidebar { top: 137px; height: calc(100vh - 137px); }
 .event-tag { padding: 2px 5px; color: #76500f; background: #f6e7c9; border-radius: 5px; font-size: 10px; }
 
 .workspace { width: min(1500px, 100%); margin: 0 auto; padding: 28px clamp(20px, 3vw, 48px) 48px; }
+.result-summary { margin-bottom: 18px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.result-summary > div { min-width: 0; padding: 13px 15px; display: flex; align-items: center; justify-content: space-between; gap: 10px; background: linear-gradient(145deg, #f8fbf8, #edf4ef); border: 1px solid #d5e1d8; border-radius: 10px; }
+.result-summary span { color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .04em; }
+.result-summary strong { color: var(--forest); font-family: Consolas, monospace; font-size: 23px; }
 .event-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; }
 .event-head .eyebrow { color: var(--forest); }
 .event-head h2 { margin: 3px 0 1px; font-size: clamp(24px, 3vw, 34px); letter-spacing: -.03em; }
@@ -258,6 +262,10 @@ input:focus, select:focus, textarea:focus { border-color: #4a8c6b; box-shadow: 0
 .dialog-close { width: 36px; height: 36px; flex: 0 0 auto; color: #4e5b53; background: #eef2ee; border: 0; border-radius: 50%; font-size: 23px; line-height: 1; }
 .import-body { padding: 20px; }
 .import-intro { margin: 0 0 14px; color: #4f5c54; font-size: 13px; }
+.import-field { margin-bottom: 14px; display: grid; grid-template-columns: 130px minmax(0, 1fr); align-items: center; gap: 10px; }
+.import-field span { color: #435148; font-size: 12px; font-weight: 800; }
+.import-field input { width: 100%; padding: 10px 12px; color: var(--ink); background: white; border: 1px solid #cbd8ce; border-radius: 8px; }
+.import-field input:focus { outline: 2px solid rgba(41,113,76,.2); border-color: var(--forest-2); }
 .drop-zone { min-height: 190px; padding: 26px; display: grid; place-items: center; align-content: center; gap: 12px; color: #345341; background: #f1f7f3; border: 2px dashed #8eae9a; border-radius: 12px; text-align: center; transition: .15s ease; }
 .drop-zone.dragging { background: #dfeee4; border-color: var(--forest-2); transform: scale(.995); }
 .drop-zone strong { font-size: 17px; }
@@ -273,6 +281,7 @@ input:focus, select:focus, textarea:focus { border-color: #4a8c6b; box-shadow: 0
 .import-file-card small { color: var(--muted); font-size: 10px; }
 .import-more { min-height: 110px; display: grid; place-items: center; color: var(--muted); background: #f1f4f1; border: 1px dashed #c8d3ca; border-radius: 9px; font-size: 13px; font-weight: 700; }
 .import-actions { margin-top: 16px; display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.import-actions span { margin-right: auto; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .job-result { margin-top: 14px; padding: 12px 14px; color: #24513a; background: #e8f3eb; border: 1px solid #c2ddca; border-radius: 8px; font-size: 13px; }
 
 @media (max-width: 1100px) {
@@ -281,7 +290,7 @@ input:focus, select:focus, textarea:focus { border-color: #4a8c6b; box-shadow: 0
   .photo-frame, .photo-frame img { min-height: 340px; }
   .form-grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .video-open { grid-template-columns: 1fr; }
-  .ai-result-grid, .import-preview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .result-summary, .ai-result-grid, .import-preview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 760px) {
   .topbar { position: relative; align-items: flex-start; flex-direction: column; }
@@ -299,8 +308,9 @@ input:focus, select:focus, textarea:focus { border-color: #4a8c6b; box-shadow: 0
   .form-grid.two, .form-grid.three, .form-grid.four { grid-template-columns: 1fr; }
   .conservative-note { flex-direction: column; }
   .ai-controls { align-items: stretch; flex-direction: column; }
-  .ai-result-grid, .import-preview { grid-template-columns: 1fr; }
+  .result-summary, .ai-result-grid, .import-preview { grid-template-columns: 1fr; }
   .import-dialog { width: 96vw; }
   .import-body, .dialog-head { padding: 14px; }
   .import-actions { align-items: stretch; flex-direction: column; }
+  .import-field { grid-template-columns: 1fr; gap: 6px; }
 }

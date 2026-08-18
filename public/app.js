@@ -59,6 +59,7 @@ const state = {
   importFiles: [],
   importPreviewUrls: [],
   importJob: null,
+  uploading: false,
   aiJobId: null,
   aiJobEventId: null,
   aiPollTimer: null,
@@ -68,9 +69,9 @@ const state = {
 let deferredInstallPrompt = null;
 
 const LOCAL_SERVICE_ORIGIN = "http://127.0.0.1:4173";
-const SERVICE_ORIGIN = window.location.hostname.endsWith("github.io")
-  ? LOCAL_SERVICE_ORIGIN
-  : window.location.origin;
+const SERVICE_ORIGIN = ["127.0.0.1", "localhost"].includes(window.location.hostname)
+  ? window.location.origin
+  : LOCAL_SERVICE_ORIGIN;
 
 function serviceUrl(pathname) {
   return new URL(String(pathname).replace(/^\/+/, ""), `${SERVICE_ORIGIN}/`).href;
@@ -202,6 +203,12 @@ function renderStatus() {
   $("#progress-text").textContent = `${reviewed} / ${total}`;
   $("#progress-bar").style.width = total ? `${(reviewed / total) * 100}%` : "0%";
   $("#progress-meta").textContent = `尚未覆核 ${unreviewed} 組 · 完成 ${reviewed} 組`;
+  $("#summary-total").textContent = total || 0;
+  $("#summary-ai-complete").textContent = state.events.filter((event) => event.AIStatus === "AI_COMPLETE").length;
+  $("#summary-needs-review").textContent = state.events.filter((event) => ["NEEDS_REVIEW", "CONFLICT", "UNCERTAIN"].includes(event.ReviewStatus)).length;
+  const species = new Set(state.events.flatMap((event) => String(event.AISpecies || event.CommonName || "")
+    .split(";").map((value) => value.trim()).filter(Boolean)));
+  $("#summary-species").textContent = species.size;
 }
 
 function applyFilter() {
@@ -708,7 +715,7 @@ function formatBytes(bytes) {
 }
 
 async function sha256File(file) {
-  if (!globalThis.crypto?.subtle) return "UNAVAILABLE";
+  if (!globalThis.crypto?.subtle || file.size > 64 * 1024 * 1024) return "SERVER_CALCULATED";
   const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -734,15 +741,19 @@ function renderImportPreview() {
       card.append(image);
     } else {
       const mediaType = document.createElement("div");
-      mediaType.className = "media-type-icon";
+      mediaType.className = "import-media-icon";
       mediaType.textContent = "VIDEO";
       card.append(mediaType);
     }
+    const copy = document.createElement("div");
     const name = document.createElement("strong");
     name.textContent = item.relativePath;
-    const detail = document.createElement("span");
-    detail.textContent = `${formatBytes(item.file.size)} · SHA-256 ${item.sha256.slice(0, 12)}…`;
-    card.append(name, detail);
+    const detail = document.createElement("small");
+    detail.textContent = item.sha256 === "SERVER_CALCULATED"
+      ? `${formatBytes(item.file.size)} · SHA-256 由服務端驗證`
+      : `${formatBytes(item.file.size)} · SHA-256 ${item.sha256.slice(0, 12)}…`;
+    copy.append(name, detail);
+    card.append(copy);
     preview.append(card);
   }
   if (state.importFiles.length > 12) {
@@ -764,6 +775,7 @@ async function handleImportFiles(fileList) {
   state.importJob = null;
   $("#job-result").hidden = true;
   $("#prepare-job-button").disabled = true;
+  $("#prepare-job-button").textContent = "上傳並建立事件";
   if (!candidates.length) {
     $("#import-summary").textContent = "沒有可接受的照片或影片。";
     clearImportPreviews();
@@ -786,52 +798,118 @@ async function handleImportFiles(fileList) {
   progress.hidden = true;
   const totalBytes = state.importFiles.reduce((sum, item) => sum + item.file.size, 0);
   const folders = new Set(state.importFiles.map((item) => item.relativePath.includes("/") ? item.relativePath.split("/")[0] : "單檔選取"));
-  $("#import-summary").textContent = `已檢查 ${state.importFiles.length} 個檔案 · ${folders.size} 個來源 · ${formatBytes(totalBytes)} · 原始檔唯讀`;
+  if (!$("#import-deployment-name").value && folders.size === 1 && !folders.has("單檔選取")) {
+    $("#import-deployment-name").value = [...folders][0];
+  }
+  $("#import-summary").textContent = `已檢查 ${state.importFiles.length} 個檔案 · ${folders.size} 個來源 · ${formatBytes(totalBytes)} · 預估約 ${Math.ceil(state.importFiles.length / 4)} 個事件`;
   $("#prepare-job-button").disabled = false;
   renderImportPreview();
 }
 
-function prepareImportJob() {
-  if (!state.importFiles.length) return;
-  const job = {
-    jobId: `CAMTRAP-${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}`,
-    schemaVersion: "2.0",
-    status: "IMPORT_READY",
-    pairingStatus: "PENDING",
-    createdAt: new Date().toISOString(),
-    inferenceEngine: null,
-    mediaCount: state.importFiles.length,
-    totalBytes: state.importFiles.reduce((sum, item) => sum + item.file.size, 0),
-    media: state.importFiles.map((item) => ({
-      relativePath: item.relativePath,
-      filename: item.file.name,
-      size: item.file.size,
-      mimeType: item.file.type || "application/octet-stream",
-      lastModified: new Date(item.file.lastModified).toISOString(),
-      sha256: item.sha256,
-    })),
-  };
-  state.importJob = job;
-  sessionStorage.setItem("cameraTrapPendingJob", JSON.stringify({
-    jobId: job.jobId,
-    schemaVersion: job.schemaVersion,
-    status: job.status,
-    pairingStatus: job.pairingStatus,
-    createdAt: job.createdAt,
-    mediaCount: job.mediaCount,
-    totalBytes: job.totalBytes,
-  }));
+async function responseJson(response, fallbackMessage) {
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || fallbackMessage);
+  return payload;
+}
+
+async function reloadEventCollection(preferredId = "") {
+  const response = await fetch(serviceUrl("/api/events"));
+  const payload = await responseJson(response, "無法重新載入事件成果。");
+  state.events = payload.events.map(normalizeEvent);
+  state.status = payload.status;
+  state.currentId = state.events.some((event) => event.EventID === preferredId)
+    ? preferredId
+    : (state.currentId && state.events.some((event) => event.EventID === state.currentId) ? state.currentId : state.events[0]?.EventID || null);
+  renderStatus();
+  applyFilter();
+  if (state.currentId) renderCurrentEvent();
+}
+
+async function uploadImportJob() {
+  if (!state.importFiles.length || state.uploading) return;
+  state.uploading = true;
+  const button = $("#prepare-job-button");
+  const progress = $("#hash-progress");
   const result = $("#job-result");
+  button.disabled = true;
   result.hidden = false;
-  result.textContent = JSON.stringify({
-    jobId: job.jobId,
-    status: job.status,
-    pairingStatus: job.pairingStatus,
-    mediaCount: job.mediaCount,
-    totalSize: formatBytes(job.totalBytes),
-    nextStep: "將媒體登錄成事件後，再由事件頁執行 MegaDetector／SpeciesNet",
-  }, null, 2);
-  showToast(`${job.jobId} 的本機匯入清單已建立`);
+  progress.hidden = false;
+  progress.max = state.importFiles.length + 1;
+  progress.value = state.importFiles.filter((item) => item.uploaded).length;
+  try {
+    if (!state.importJob) {
+      $("#import-summary").textContent = "正在建立安全上傳工作…";
+      const response = await fetch(serviceUrl("/api/imports"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          schemaVersion: "2.1",
+          deploymentName: $("#import-deployment-name").value.trim(),
+          media: state.importFiles.map((item) => ({
+            relativePath: item.relativePath,
+            filename: item.file.name,
+            size: item.file.size,
+            mimeType: item.file.type || "application/octet-stream",
+            lastModified: new Date(item.file.lastModified).toISOString(),
+            sha256: item.sha256,
+          })),
+        }),
+      });
+      state.importJob = (await responseJson(response, "無法建立上傳工作。")).import;
+    }
+    for (let index = 0; index < state.importFiles.length; index += 1) {
+      const item = state.importFiles[index];
+      if (item.uploaded) continue;
+      $("#import-summary").textContent = `正在上傳 ${index + 1} / ${state.importFiles.length}：${item.relativePath}`;
+      const response = await fetch(serviceUrl(`/api/imports/${encodeURIComponent(state.importJob.importId)}/files/${index}`), {
+        method: "POST",
+        headers: { "Content-Type": item.file.type || "application/octet-stream" },
+        body: item.file,
+      });
+      const payload = await responseJson(response, `上傳失敗：${item.relativePath}`);
+      item.uploaded = true;
+      item.serverSha256 = payload.file.sha256;
+      progress.value = index + 1;
+    }
+    $("#import-summary").textContent = "媒體上傳完成，正在建立事件…";
+    const finalizeResponse = await fetch(serviceUrl(`/api/imports/${encodeURIComponent(state.importJob.importId)}/finalize`), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const completed = (await responseJson(finalizeResponse, "媒體已上傳，但建立事件失敗。")).import;
+    progress.value = state.importFiles.length + 1;
+    state.importJob = completed;
+    sessionStorage.setItem("cameraTrapLastImport", JSON.stringify(completed));
+    await reloadEventCollection(completed.eventIds[0] || "");
+    $("#filter-select").value = "all";
+    $("#search-input").value = "";
+    applyFilter();
+    $("#import-summary").textContent = `完成：${completed.mediaCount} 個媒體已建立 ${completed.eventIds.length} 個事件，原始檔未被修改。`;
+    result.textContent = JSON.stringify({
+      importId: completed.importId,
+      deploymentId: completed.deploymentId,
+      status: completed.status,
+      mediaCount: completed.mediaCount,
+      eventCount: completed.eventIds.length,
+      firstEvent: completed.eventIds[0] || "",
+      nextStep: "可關閉視窗，從事件清單查看成果或啟動 MegaDetector／SpeciesNet。",
+    }, null, 2);
+    showToast(`已建立 ${completed.eventIds.length} 個可辨識事件`);
+    clearImportPreviews();
+    state.importFiles = [];
+    $("#photo-picker").value = "";
+    $("#folder-picker").value = "";
+  } catch (error) {
+    result.textContent = `上傳尚未完成：${error.message}\n\n保留此視窗後再按一次，可從目前檔案繼續。`;
+    $("#import-summary").textContent = error.message;
+    button.disabled = false;
+    showToast(error.message, true);
+  } finally {
+    state.uploading = false;
+    progress.hidden = state.importFiles.length === 0;
+    button.textContent = state.importFiles.length ? "繼續上傳並建立事件" : "上傳並建立事件";
+  }
 }
 
 function initializeControls() {
@@ -908,7 +986,7 @@ function initializeControls() {
     });
   }
   $("#drop-zone").addEventListener("drop", (event) => handleImportFiles(event.dataTransfer.files));
-  $("#prepare-job-button").addEventListener("click", prepareImportJob);
+  $("#prepare-job-button").addEventListener("click", uploadImportJob);
   $("#start-ai-button").addEventListener("click", startAiInference);
 
   window.addEventListener("beforeunload", (event) => {

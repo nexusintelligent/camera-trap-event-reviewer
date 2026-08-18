@@ -1,11 +1,11 @@
 {
-  "product": "野生動物事件判讀台",
-  "version": "2.1.0",
-  "buildDate": "2026-08-14",
+  "product": "野生動物辨識成果台",
+  "version": "2.2.0",
+  "buildDate": "2026-08-18",
   "deploymentId": "CAM023-2026-08-A",
   "eventCount": 154,
   "mediaCount": 616,
-  "workflow": "event import, MegaDetector/SpeciesNet inference, AI/human separation, multi-label review and audit",
+  "workflow": "browser upload, server-side validation, automatic event grouping, MegaDetector/SpeciesNet inference, result review and export",
   "runtime": "Node.js local service plus Python 3.11 AI runtime",
   "listenAddress": "127.0.0.1",
   "inferenceAvailable": true,
@@ -22,18 +22,22 @@
     "two end-to-end photo/video inference jobs on a test CSV copy",
     "media byte-range streaming",
     "taxonomy load",
-    "v2 annotation validation",
+    "v2.1 annotation validation",
     "immutable AI field rejection",
     "CSV export",
     "PWA shell-only cache policy",
-    "path traversal rejection"
+    "path traversal rejection",
+    "web upload manifest validation",
+    "server-side SHA-256 and media signature validation",
+    "automatic web event persistence"
   ],
   "browserChecks": [
     "event media rendered",
     "multi-label human review",
     "separate AI result panel and run control",
-    "file and folder import dialog",
-    "local SHA-256 preparation",
+    "file and folder upload dialog",
+    "client and server SHA-256 validation",
+    "automatic event creation and result refresh",
     "responsive layout",
     "no browser console errors"
   ]

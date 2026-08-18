@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#123f2f">
-  <meta name="description" content="以事件為單位進行相機陷阱照片與影片判讀、標註及品質覆核。">
-  <meta name="application-name" content="野生動物事件判讀台">
+  <meta name="description" content="上傳相機陷阱照片與影片，以事件為單位查看 AI 辨識成果、人工覆核並匯出資料。">
+  <meta name="application-name" content="野生動物辨識成果台">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="事件判讀台">
-  <title>野生動物事件判讀台</title>
+  <title>野生動物辨識成果台</title>
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="./icons/icon-180.png">
@@ -21,14 +21,14 @@
       <div class="brand-mark" aria-hidden="true">CT</div>
       <div class="brand-copy">
         <div class="eyebrow">CAMERA TRAP · GOLD DATA</div>
-        <h1 id="app-title">野生動物事件判讀台</h1>
+        <h1 id="app-title">野生動物辨識成果台</h1>
       </div>
     </div>
     <div class="top-actions">
-      <button class="button ghost" id="open-import-button" type="button">匯入媒體</button>
+      <button class="button ghost" id="open-import-button" type="button">上傳媒體</button>
       <button class="button ghost install-button" id="install-app-button" type="button" hidden>安裝應用程式</button>
       <div class="save-state" id="save-state"><span></span>尚未修改</div>
-      <a class="button ghost" id="export-link" href="#">匯出目前 CSV</a>
+      <a class="button ghost" id="export-link" href="#">匯出成果 CSV</a>
       <button class="button primary" id="save-button" type="button">儲存 <kbd>Ctrl</kbd>+<kbd>S</kbd></button>
     </div>
   </header>
@@ -75,6 +75,12 @@
     </aside>
 
     <main class="workspace">
+      <section class="result-summary" aria-label="辨識成果總覽">
+        <div><span>全部事件</span><strong id="summary-total">0</strong></div>
+        <div><span>AI 已完成</span><strong id="summary-ai-complete">0</strong></div>
+        <div><span>需要覆核</span><strong id="summary-needs-review">0</strong></div>
+        <div><span>物種候選</span><strong id="summary-species">0</strong></div>
+      </section>
       <section class="event-head">
         <div>
           <div class="eyebrow" id="deployment-label">DEPLOYMENT</div>
@@ -289,30 +295,36 @@
   <dialog id="import-dialog" class="import-dialog">
     <div class="dialog-head">
       <div>
-        <div class="eyebrow">LOCAL MEDIA · V2</div>
-        <h2>建立待辨識工作</h2>
+        <div class="eyebrow">WEB UPLOAD · V2.1</div>
+        <h2>上傳媒體並建立事件</h2>
       </div>
       <button id="close-import-dialog" type="button" aria-label="關閉">×</button>
     </div>
-    <p class="import-intro">由你主動選擇照片、影片或整個資料夾。瀏覽器不會取得完整磁碟路徑，也不會修改原始媒體。</p>
-    <input id="photo-picker" type="file" accept=".jpg,.jpeg,.png,.webp,.avi,.mp4,.mov" multiple hidden>
-    <input id="folder-picker" type="file" accept=".jpg,.jpeg,.png,.webp,.avi,.mp4,.mov" webkitdirectory directory multiple hidden>
-    <div class="drop-zone" id="drop-zone" tabindex="0" role="button" aria-label="拖放媒體或開啟檔案選擇">
-      <strong>將照片或事件資料夾拖曳到這裡</strong>
-      <span>支援 JPG、PNG、WEBP、AVI、MP4、MOV</span>
-      <div>
-        <button class="button primary" id="choose-photos-button" type="button">選擇照片／影片</button>
-        <button class="button ghost" id="choose-folder-button" type="button">選擇整個資料夾</button>
+    <div class="import-body">
+      <p class="import-intro">由你主動選擇照片、影片或整個資料夾。媒體會上傳到辨識服務的工作副本；瀏覽器不會取得完整磁碟路徑，也不會修改電腦中的原始檔。</p>
+      <label class="import-field">
+        <span>資料批次名稱</span>
+        <input id="import-deployment-name" type="text" maxlength="48" placeholder="例如：LOC001-CAM023-2026-08">
+      </label>
+      <input id="photo-picker" type="file" accept=".jpg,.jpeg,.png,.webp,.avi,.mp4,.mov" multiple hidden>
+      <input id="folder-picker" type="file" accept=".jpg,.jpeg,.png,.webp,.avi,.mp4,.mov" webkitdirectory directory multiple hidden>
+      <div class="drop-zone" id="drop-zone" tabindex="0" role="button" aria-label="拖放媒體或開啟檔案選擇">
+        <strong>將照片或事件資料夾拖曳到這裡</strong>
+        <span>支援 JPG、PNG、WEBP、AVI、MP4、MOV</span>
+        <div class="drop-zone-actions">
+          <button class="button primary" id="choose-photos-button" type="button">選擇照片／影片</button>
+          <button class="button ghost" id="choose-folder-button" type="button">選擇整個資料夾</button>
+        </div>
       </div>
+      <div class="import-summary" id="import-summary">尚未選擇檔案</div>
+      <progress id="hash-progress" max="1" value="0" hidden></progress>
+      <div class="import-preview" id="import-preview"></div>
+      <div class="import-actions">
+        <span>完成後會自動依資料夾、拍攝時間及「3 張照片＋1 段影片」規則建立事件。</span>
+        <button class="button primary" id="prepare-job-button" type="button" disabled>上傳並建立事件</button>
+      </div>
+      <pre class="job-result" id="job-result" hidden></pre>
     </div>
-    <div class="import-summary" id="import-summary">尚未選擇檔案</div>
-    <progress id="hash-progress" max="1" value="0" hidden></progress>
-    <div class="import-preview" id="import-preview"></div>
-    <div class="import-actions">
-      <span>匯入清單只保存在本次瀏覽器工作階段；目前 AI 按鈕辨識的是已登錄事件。</span>
-      <button class="button primary" id="prepare-job-button" type="button" disabled>建立本機匯入清單</button>
-    </div>
-    <pre class="job-result" id="job-result" hidden></pre>
   </dialog>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>

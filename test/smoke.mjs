@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 
 const baseUrl = process.env.SMOKE_BASE_URL || "http://127.0.0.1:4173";
 const allowWrite = process.env.SMOKE_ALLOW_WRITE === "1";
+const allowImport = process.env.SMOKE_ALLOW_IMPORT === "1";
 
 async function json(pathname, options) {
   const response = await fetch(`${baseUrl}${pathname}`, options);
@@ -20,6 +21,8 @@ assert.match(pageHtml, /id="import-dialog"/);
 assert.match(pageHtml, /id="human-label-options"/);
 assert.match(pageHtml, /id="ai-section"/);
 assert.match(pageHtml, /id="start-ai-button"/);
+assert.match(pageHtml, /id="import-deployment-name"/);
+assert.match(pageHtml, /上傳並建立事件/);
 checks.push("pwa:html-metadata");
 
 const manifestResponse = await fetch(`${baseUrl}/manifest.webmanifest`);
@@ -77,11 +80,21 @@ checks.push("health:154-events");
 
 const configPayload = await json("/api/config");
 assert.equal(configPayload.response.status, 200);
-assert.equal(configPayload.body.schemaVersion, "2.0");
+assert.equal(configPayload.body.schemaVersion, "2.1");
 assert.equal(typeof configPayload.body.inferenceAvailable, "boolean");
 assert.equal(typeof configPayload.body.aiRuntime?.status, "string");
 assert.ok(configPayload.body.auditLog);
+assert.equal(configPayload.body.webUpload?.enabled, true);
+assert.ok(configPayload.body.webUpload?.acceptedExtensions.includes(".jpg"));
 checks.push("config:v2-capabilities");
+
+const invalidImport = await json("/api/imports", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ deploymentName: "invalid", media: [] }),
+});
+assert.equal(invalidImport.response.status, 400);
+checks.push("upload:invalid-manifest-rejected");
 
 const aiStatus = await json("/api/ai/status");
 assert.equal(aiStatus.response.status, 200);
@@ -103,7 +116,7 @@ assert.equal(eventPayload.body.events.length, 154);
 const first = eventPayload.body.events[0];
 assert.ok(first.EventID);
 assert.ok(first.media.Photo1);
-assert.equal(first.SchemaVersion, "2.0");
+assert.equal(first.SchemaVersion, "2.1");
 assert.ok(first.AIStatus);
 assert.equal(typeof first.HumanLabels, "string");
 checks.push("events:loaded");
@@ -171,12 +184,71 @@ if (allowWrite) {
   assert.equal(saved.response.status, 200);
   assert.equal(saved.body.event.Notes, "SMOKE_TEST_ONLY");
   assert.equal(saved.body.event.HumanLabels, "uncertain");
-  assert.equal(saved.body.event.SchemaVersion, "2.0");
+  assert.equal(saved.body.event.SchemaVersion, "2.1");
   assert.ok(saved.body.event.LastModifiedAt);
   const exportResponse = await fetch(`${baseUrl}/api/export.csv`);
   const csv = await exportResponse.text();
   assert.ok(csv.includes("SMOKE_TEST_ONLY"));
   checks.push("write:save-and-export");
+}
+
+if (allowImport) {
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+  const mp4 = new Uint8Array([0x00, 0x00, 0x00, 0x10, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d]);
+  const uploadFiles = [
+    { path: "SMOKE/IMG_0001.JPG", type: "image/jpeg", bytes: jpeg, modified: "2026-08-18T01:00:00.000Z" },
+    { path: "SMOKE/IMG_0002.JPG", type: "image/jpeg", bytes: jpeg, modified: "2026-08-18T01:00:01.000Z" },
+    { path: "SMOKE/IMG_0003.JPG", type: "image/jpeg", bytes: jpeg, modified: "2026-08-18T01:00:02.000Z" },
+    { path: "SMOKE/VID_0001.MP4", type: "video/mp4", bytes: mp4, modified: "2026-08-18T01:00:03.000Z" },
+  ];
+  const createdImport = await json("/api/imports", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      deploymentName: "SMOKE-WEB",
+      media: uploadFiles.map((file) => ({
+        relativePath: file.path,
+        filename: file.path.split("/").at(-1),
+        size: file.bytes.byteLength,
+        mimeType: file.type,
+        lastModified: file.modified,
+        sha256: "SERVER_CALCULATED",
+      })),
+    }),
+  });
+  assert.equal(createdImport.response.status, 201);
+  const importId = createdImport.body.import.importId;
+  for (const [index, file] of uploadFiles.entries()) {
+    const response = await fetch(`${baseUrl}/api/imports/${encodeURIComponent(importId)}/files/${index}`, {
+      method: "POST",
+      headers: { "Content-Type": file.type },
+      body: file.bytes,
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 200, payload.error);
+    assert.match(payload.file.sha256, /^[a-f0-9]{64}$/);
+  }
+  const finalized = await json(`/api/imports/${encodeURIComponent(importId)}/finalize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  assert.equal(finalized.response.status, 201);
+  assert.equal(finalized.body.import.status, "COMPLETE");
+  assert.equal(finalized.body.import.eventIds.length, 1);
+  const importedEventId = finalized.body.import.eventIds[0];
+  const refreshed = await json("/api/events");
+  const imported = refreshed.body.events.find((event) => event.EventID === importedEventId);
+  assert.equal(imported.SourceType, "web_upload");
+  assert.equal(imported.SchemaVersion, "2.1");
+  assert.ok(imported.media.Photo1);
+  assert.ok(imported.media.Video);
+  const importedImage = await fetch(`${baseUrl}${imported.media.Photo1}`, { headers: { Range: "bytes=0-1" } });
+  assert.equal(importedImage.status, 206);
+  assert.deepEqual([...new Uint8Array(await importedImage.arrayBuffer())], [0xff, 0xd8]);
+  const exportResponse = await fetch(`${baseUrl}/api/export.csv`);
+  assert.match(await exportResponse.text(), new RegExp(importedEventId));
+  checks.push("upload:media-verified-and-event-created");
 }
 
 console.log(JSON.stringify({ ok: true, baseUrl, checks }, null, 2));

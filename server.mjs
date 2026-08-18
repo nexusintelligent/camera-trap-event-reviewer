@@ -1,8 +1,11 @@
-import { createReadStream, existsSync } from "node:fs";
-import { appendFile, copyFile, link, mkdir, readFile, rename, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { appendFile, copyFile, link, mkdir, open, readFile, rename, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import http from "node:http";
 import path from "node:path";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { parseCsv, stringifyCsv } from "./lib/csv.mjs";
 
@@ -34,10 +37,27 @@ config.ai.speciesnetVersion ||= "unknown";
 config.ai.detectionThresholdForClassification = Number(config.ai.detectionThresholdForClassification ?? 0.15);
 config.ai.detectionThresholdForOutput = Number(config.ai.detectionThresholdForOutput ?? 0.01);
 config.ai.timeSampleSeconds = Number(config.ai.timeSampleSeconds ?? 1);
+config.allowedBrowserOrigins = new Set([
+  ...(Array.isArray(config.allowedBrowserOrigins) ? config.allowedBrowserOrigins : []),
+  ...(process.env.CAMTRAP_ALLOWED_ORIGINS || "").split(","),
+].map((value) => value.trim()).filter(Boolean));
+config.webUploads ||= {};
+config.webUploads.root = path.resolve(ROOT, expandEnvironmentVariables(
+  process.env.CAMTRAP_UPLOADS_ROOT || config.webUploads.root || path.join(ROOT, "web-uploads"),
+));
+config.webUploads.mediaRoot = path.join(config.webUploads.root, "media");
+config.webUploads.sessionsRoot = path.join(config.webUploads.root, "sessions");
+config.webUploads.eventsCsv = path.resolve(ROOT, expandEnvironmentVariables(
+  process.env.CAMTRAP_WEB_EVENTS_CSV || config.webUploads.eventsCsv || path.join(config.webUploads.root, "web-events.csv"),
+));
+config.webUploads.maxFilesPerImport = Number(config.webUploads.maxFilesPerImport ?? 5000);
+config.webUploads.maxFileBytes = Number(config.webUploads.maxFileBytes ?? 4_294_967_296);
+config.webUploads.eventGapSeconds = Number(config.webUploads.eventGapSeconds ?? 120);
 
 const IMMUTABLE_FIELDS = [
   "DeploymentID", "EventID", "EventTime", "SamplingStratum", "AuditRandom",
-  "ChallengeReasons", "ImportantSpeciesStatus", "Photo1", "Photo2", "Photo3", "Video",
+  "ChallengeReasons", "ImportantSpeciesStatus", "SourceType", "SourceRelativePaths", "MediaSha256",
+  "Photo1", "Photo2", "Photo3", "Video",
 ];
 const AI_FIELDS = [
   "AIStatus", "AIEventLabels", "AISpecies", "AIConfidence", "AIModelName",
@@ -70,6 +90,9 @@ const ENUMS = {
   ],
 };
 const HUMAN_LABELS = new Set(["empty", "animal", "person", "vehicle", "equipment_error", "uncertain"]);
+const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
+const VIDEO_EXTENSIONS = new Set([".avi", ".mp4", ".mov"]);
+const UPLOAD_EXTENSIONS = new Set([...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS]);
 
 const MIME_TYPES = {
   ".avi": "video/x-msvideo",
@@ -83,20 +106,22 @@ const MIME_TYPES = {
   ".mp4": "video/mp4",
   ".png": "image/png",
   ".svg": "image/svg+xml",
+  ".webp": "image/webp",
   ".webmanifest": "application/manifest+json; charset=utf-8",
 };
 
 let events = [];
 let taxonomy = [];
-let knownMedia = new Set();
+let mediaPaths = new Map();
 let saveQueue = Promise.resolve();
 let aiRunQueue = Promise.resolve();
 let aiRuntimeStatus = null;
 const aiJobs = new Map();
+const importSessions = new Map();
 
 function isAllowedBrowserOrigin(origin) {
   if (!origin) return false;
-  if (origin === "https://nexusintelligent.github.io") return true;
+  if (config.allowedBrowserOrigins.has(origin)) return true;
   try {
     const url = new URL(origin);
     return url.protocol === "http:" && (url.hostname === "127.0.0.1" || url.hostname === "localhost");
@@ -160,6 +185,46 @@ function extractFilenameHint(filename = "") {
   return stem.slice(dashIndex + 1).trim();
 }
 
+function initializeEvent(source, working = {}, sourceKind = "registered") {
+  const merged = {};
+  for (const field of IMMUTABLE_FIELDS) merged[field] = source[field] ?? "";
+  for (const field of AI_FIELDS) merged[field] = working[field] ?? source[field] ?? "";
+  for (const field of EDITABLE_FIELDS) merged[field] = working[field] ?? source[field] ?? "";
+  for (const field of AUDIT_FIELDS) merged[field] = working[field] ?? source[field] ?? "";
+  if (!merged.SourceType) merged.SourceType = sourceKind === "web" ? "web_upload" : "registered";
+  if (!merged.AIStatus) merged.AIStatus = "AI_PENDING";
+  if (!merged.HumanLabels && merged.FinalDecision) merged.HumanLabels = merged.FinalDecision;
+  if (!merged.IndividualCountMax && merged.CountMin) merged.IndividualCountMax = merged.CountMin;
+  if (!merged.TaxonomyVersion) merged.TaxonomyVersion = "taxonomy_v1.0";
+  merged.SchemaVersion = "2.1";
+  Object.defineProperty(merged, "_source", { value: sourceKind, writable: true, enumerable: false });
+  return merged;
+}
+
+function pathInside(root, relativePath) {
+  const resolvedRoot = path.resolve(root);
+  const resolved = path.resolve(resolvedRoot, relativePath);
+  if (!resolved.startsWith(`${resolvedRoot}${path.sep}`)) throw new Error(`媒體路徑超出允許範圍：${relativePath}`);
+  return resolved;
+}
+
+function registerEventMedia(event) {
+  for (const field of ["Photo1", "Photo2", "Photo3", "Video"]) {
+    const token = event[field];
+    if (!token) continue;
+    if (event._source === "web") {
+      const normalized = String(token).replace(/\\/g, "/");
+      if (normalized.startsWith("/") || normalized.split("/").some((part) => !part || part === "." || part === "..")) {
+        throw new Error(`網頁匯入媒體代碼格式錯誤：${token}`);
+      }
+      mediaPaths.set(token, pathInside(config.webUploads.mediaRoot, normalized));
+    } else {
+      if (path.basename(token) !== token) throw new Error(`既有媒體檔名格式錯誤：${token}`);
+      mediaPaths.set(token, pathInside(config.mediaRoot, token));
+    }
+  }
+}
+
 async function loadState() {
   const sourceText = await readFile(config.manifestCsv, "utf8");
   const sourceEvents = parseCsv(sourceText);
@@ -179,21 +244,19 @@ async function loadState() {
     workingById = new Map(workingRows.map((row) => [row.EventID, row]));
   }
 
-  events = sourceEvents.map((source) => {
-    const working = workingById.get(source.EventID) || {};
-    const merged = {};
-    for (const field of IMMUTABLE_FIELDS) merged[field] = source[field] ?? "";
-    for (const field of AI_FIELDS) merged[field] = working[field] ?? source[field] ?? "";
-    for (const field of EDITABLE_FIELDS) merged[field] = working[field] ?? source[field] ?? "";
-    for (const field of AUDIT_FIELDS) merged[field] = working[field] ?? source[field] ?? "";
-    if (!merged.AIStatus) merged.AIStatus = "AI_PENDING";
-    if (!merged.HumanLabels && merged.FinalDecision) merged.HumanLabels = merged.FinalDecision;
-    if (!merged.IndividualCountMax && merged.CountMin) merged.IndividualCountMax = merged.CountMin;
-    if (!merged.TaxonomyVersion) merged.TaxonomyVersion = "taxonomy_v1.0";
-    merged.SchemaVersion = "2.0";
-    return merged;
+  const registeredEvents = sourceEvents.map((source) => initializeEvent(source, workingById.get(source.EventID) || {}, "registered"));
+  const webRows = existsSync(config.webUploads.eventsCsv)
+    ? parseCsv(await readFile(config.webUploads.eventsCsv, "utf8"))
+    : [];
+  const allEventIds = new Set(registeredEvents.map((event) => event.EventID));
+  const webEvents = webRows.map((row) => {
+    if (!row.EventID || allEventIds.has(row.EventID)) throw new Error(`網頁匯入事件含空白或重複 EventID：${row.EventID || "(blank)"}`);
+    allEventIds.add(row.EventID);
+    return initializeEvent(row, row, "web");
   });
-  knownMedia = new Set(events.flatMap((event) => [event.Photo1, event.Photo2, event.Photo3, event.Video]).filter(Boolean));
+  events = [...registeredEvents, ...webEvents];
+  mediaPaths = new Map();
+  for (const event of events) registerEventMedia(event);
   taxonomy = JSON.parse(await readFile(config.taxonomyJson, "utf8"));
 }
 
@@ -252,7 +315,7 @@ async function appendAuditEntry(before, after) {
   const destination = path.resolve(config.auditLog);
   await mkdir(path.dirname(destination), { recursive: true });
   const entry = {
-    schemaVersion: "2.0",
+    schemaVersion: "2.1",
     eventId: after.EventID,
     deploymentId: after.DeploymentID,
     changedAt: after.LastModifiedAt,
@@ -265,13 +328,13 @@ async function appendAuditEntry(before, after) {
   await appendFile(destination, `${JSON.stringify(entry)}\n`, "utf8");
 }
 
-async function persistEvents() {
-  const destination = path.resolve(config.workingCsv);
+async function persistCsv(destinationPath, rows) {
+  const destination = path.resolve(destinationPath);
   const directory = path.dirname(destination);
   await mkdir(directory, { recursive: true });
   const temporary = `${destination}.tmp-${process.pid}-${Date.now()}`;
   const backup = `${destination}.backup.csv`;
-  await writeFile(temporary, stringifyCsv(events, ALL_FIELDS), "utf8");
+  await writeFile(temporary, stringifyCsv(rows, ALL_FIELDS), "utf8");
   try {
     if (existsSync(destination)) await copyFile(destination, backup);
     await rename(temporary, destination);
@@ -281,15 +344,287 @@ async function persistEvents() {
   }
 }
 
-async function readRequestBody(request) {
+async function persistEvents(sourceKind = "all") {
+  if (sourceKind === "all" || sourceKind === "registered") {
+    await persistCsv(config.workingCsv, events.filter((event) => event._source !== "web"));
+  }
+  if (sourceKind === "all" || sourceKind === "web") {
+    await persistCsv(config.webUploads.eventsCsv, events.filter((event) => event._source === "web"));
+  }
+}
+
+function persistEvent(event) {
+  return persistEvents(event?._source === "web" ? "web" : "registered");
+}
+
+async function readRequestBody(request, maxBytes = 1_000_000) {
   const chunks = [];
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > 1_000_000) throw new Error("請求內容過大。");
+    if (size > maxBytes) throw Object.assign(new Error("請求內容過大。"), { statusCode: 413 });
     chunks.push(chunk);
   }
   return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+}
+
+function requestError(statusCode, message) {
+  return Object.assign(new Error(message), { statusCode });
+}
+
+function normalizedUploadPath(value) {
+  const normalized = String(value || "").replace(/\\/g, "/").normalize("NFC");
+  const parts = normalized.split("/");
+  if (!normalized || normalized.length > 600 || parts.some((part) => !part || part === "." || part === ".." || /[\0-\x1f]/.test(part))) {
+    throw requestError(400, `媒體相對路徑格式錯誤：${value || "(blank)"}`);
+  }
+  return normalized;
+}
+
+function normalizedDeploymentLabel(value) {
+  return String(value || "網頁匯入")
+    .normalize("NFKC")
+    .trim()
+    .replace(/[^\p{L}\p{N}_.-]+/gu, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48) || "WEB";
+}
+
+function validateImportManifest(body) {
+  if (!body || typeof body !== "object" || !Array.isArray(body.media)) throw requestError(400, "匯入清單格式錯誤。");
+  if (!body.media.length) throw requestError(400, "匯入清單沒有媒體檔案。");
+  if (body.media.length > config.webUploads.maxFilesPerImport) {
+    throw requestError(413, `單次最多可匯入 ${config.webUploads.maxFilesPerImport} 個檔案。`);
+  }
+  const seen = new Set();
+  return body.media.map((raw, index) => {
+    const relativePath = normalizedUploadPath(raw.relativePath || raw.filename);
+    if (seen.has(relativePath)) throw requestError(400, `匯入清單含重複路徑：${relativePath}`);
+    seen.add(relativePath);
+    const filename = path.posix.basename(relativePath);
+    const extension = path.extname(filename).toLowerCase();
+    if (!UPLOAD_EXTENSIONS.has(extension)) throw requestError(400, `不支援的媒體格式：${filename}`);
+    const size = Number(raw.size);
+    if (!Number.isSafeInteger(size) || size <= 0) throw requestError(400, `檔案大小格式錯誤：${filename}`);
+    if (size > config.webUploads.maxFileBytes) throw requestError(413, `檔案超過單檔上限：${filename}`);
+    const sha256 = String(raw.sha256 || "SERVER_CALCULATED").toLowerCase();
+    if (!["server_calculated", "unavailable"].includes(sha256) && !/^[a-f0-9]{64}$/.test(sha256)) {
+      throw requestError(400, `SHA-256 格式錯誤：${filename}`);
+    }
+    const lastModified = new Date(raw.lastModified || 0);
+    return {
+      index,
+      relativePath,
+      filename,
+      extension,
+      size,
+      mimeType: String(raw.mimeType || MIME_TYPES[extension] || "application/octet-stream").slice(0, 120),
+      lastModified: Number.isNaN(lastModified.getTime()) ? "" : lastModified.toISOString(),
+      clientSha256: sha256,
+      serverSha256: "",
+      storedName: `${String(index + 1).padStart(6, "0")}-${filename.replace(/[^\p{L}\p{N}_.-]+/gu, "-").slice(-180)}`,
+      mediaToken: "",
+      uploaded: false,
+    };
+  });
+}
+
+function publicImportSession(session) {
+  return {
+    importId: session.importId,
+    deploymentId: session.deploymentId,
+    sourceLabel: session.sourceLabel,
+    status: session.status,
+    createdAt: session.createdAt,
+    mediaCount: session.media.length,
+    uploadedCount: session.media.filter((item) => item.uploaded).length,
+    totalBytes: session.totalBytes,
+    eventIds: session.eventIds || [],
+  };
+}
+
+async function persistImportSession(session) {
+  await mkdir(config.webUploads.sessionsRoot, { recursive: true });
+  const destination = pathInside(config.webUploads.sessionsRoot, `${session.importId}.json`);
+  await writeFile(destination, JSON.stringify(session, null, 2), "utf8");
+}
+
+async function getImportSession(importId) {
+  if (!/^IMP-[A-Za-z0-9-]+$/.test(importId)) return null;
+  if (importSessions.has(importId)) return importSessions.get(importId);
+  const filename = pathInside(config.webUploads.sessionsRoot, `${importId}.json`);
+  if (!existsSync(filename)) return null;
+  const session = JSON.parse(await readFile(filename, "utf8"));
+  if (session.importId !== importId || !Array.isArray(session.media)) throw requestError(409, "匯入工作紀錄損壞。");
+  importSessions.set(importId, session);
+  return session;
+}
+
+async function createImportSession(body) {
+  const media = validateImportManifest(body);
+  const importId = `IMP-${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
+  const sourceLabel = normalizedDeploymentLabel(body.deploymentName);
+  const deploymentId = `${sourceLabel}-${importId.slice(-8)}`;
+  const session = {
+    schemaVersion: "2.1",
+    importId,
+    deploymentId,
+    sourceLabel,
+    status: "WAITING_UPLOAD",
+    createdAt: new Date().toISOString(),
+    totalBytes: media.reduce((sum, item) => sum + item.size, 0),
+    media,
+    eventIds: [],
+  };
+  importSessions.set(importId, session);
+  await persistImportSession(session);
+  return session;
+}
+
+async function validateMediaSignature(filename, extension) {
+  const handle = await open(filename, "r");
+  try {
+    const buffer = Buffer.alloc(16);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const head = buffer.subarray(0, bytesRead);
+    const ascii = (start, end) => head.subarray(start, end).toString("ascii");
+    if ([".jpg", ".jpeg"].includes(extension)) return head.length >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff;
+    if (extension === ".png") return head.length >= 8 && head.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    if (extension === ".webp") return head.length >= 12 && ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP";
+    if (extension === ".avi") return head.length >= 12 && ascii(0, 4) === "RIFF" && ascii(8, 11) === "AVI";
+    if ([".mp4", ".mov"].includes(extension)) return head.length >= 12 && ascii(4, 8) === "ftyp";
+    return false;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function receiveImportFile(request, session, index) {
+  if (!Number.isInteger(index) || index < 0 || index >= session.media.length) throw requestError(404, "找不到指定的匯入檔案。");
+  if (session.status === "COMPLETE") throw requestError(409, "此匯入工作已完成。");
+  const item = session.media[index];
+  if (item.uploaded) return item;
+  const contentLength = Number(request.headers["content-length"] || item.size);
+  if (!Number.isSafeInteger(contentLength) || contentLength !== item.size) throw requestError(400, `上傳大小與清單不符：${item.filename}`);
+  const importMediaRoot = pathInside(config.webUploads.mediaRoot, session.importId);
+  await mkdir(importMediaRoot, { recursive: true });
+  const destination = pathInside(importMediaRoot, item.storedName);
+  const temporary = `${destination}.part-${process.pid}-${Date.now()}`;
+  const hash = createHash("sha256");
+  let received = 0;
+  try {
+    const verifier = new Transform({
+      transform(chunk, _encoding, callback) {
+        received += chunk.length;
+        if (received > item.size || received > config.webUploads.maxFileBytes) {
+          callback(requestError(413, `上傳內容超過宣告大小：${item.filename}`));
+          return;
+        }
+        hash.update(chunk);
+        callback(null, chunk);
+      },
+    });
+    await pipeline(request, verifier, createWriteStream(temporary, { flags: "wx" }));
+    if (received !== item.size) throw requestError(400, `上傳內容不完整：${item.filename}`);
+    const serverSha256 = hash.digest("hex");
+    if (/^[a-f0-9]{64}$/.test(item.clientSha256) && item.clientSha256 !== serverSha256) {
+      throw requestError(400, `SHA-256 驗證失敗：${item.filename}`);
+    }
+    if (!(await validateMediaSignature(temporary, item.extension))) throw requestError(400, `檔案內容與副檔名不符：${item.filename}`);
+    await rename(temporary, destination);
+    item.serverSha256 = serverSha256;
+    item.mediaToken = `${session.importId}/${item.storedName}`;
+    item.uploaded = true;
+    session.status = "UPLOADING";
+    await persistImportSession(session);
+    return item;
+  } catch (error) {
+    await unlink(temporary).catch(() => {});
+    throw error;
+  }
+}
+
+function groupImportedMedia(media) {
+  const sorted = [...media].sort((left, right) => {
+    const leftFolder = path.posix.dirname(left.relativePath);
+    const rightFolder = path.posix.dirname(right.relativePath);
+    const folderOrder = leftFolder.localeCompare(rightFolder, "zh-Hant", { numeric: true });
+    if (folderOrder) return folderOrder;
+    const timeOrder = new Date(left.lastModified || 0).getTime() - new Date(right.lastModified || 0).getTime();
+    return timeOrder || left.relativePath.localeCompare(right.relativePath, "zh-Hant", { numeric: true });
+  });
+  const groups = [];
+  let current = [];
+  const flush = () => { if (current.length) groups.push(current); current = []; };
+  for (const item of sorted) {
+    const folder = path.posix.dirname(item.relativePath);
+    const previous = current.at(-1);
+    const photoCount = current.filter((entry) => IMAGE_EXTENSIONS.has(entry.extension)).length;
+    const videoCount = current.filter((entry) => VIDEO_EXTENSIONS.has(entry.extension)).length;
+    const gapSeconds = previous
+      ? Math.abs(new Date(item.lastModified || 0).getTime() - new Date(previous.lastModified || 0).getTime()) / 1000
+      : 0;
+    const startNew = current.length > 0 && (
+      path.posix.dirname(previous.relativePath) !== folder
+      || gapSeconds > config.webUploads.eventGapSeconds
+      || current.length >= 4
+      || (IMAGE_EXTENSIONS.has(item.extension) && photoCount >= 3)
+      || (VIDEO_EXTENSIONS.has(item.extension) && videoCount >= 1)
+    );
+    if (startNew) flush();
+    current.push(item);
+  }
+  flush();
+  return groups;
+}
+
+function importedEventFromGroup(session, group, index) {
+  const photos = group.filter((item) => IMAGE_EXTENSIONS.has(item.extension)).slice(0, 3);
+  const video = group.find((item) => VIDEO_EXTENSIONS.has(item.extension));
+  const source = Object.fromEntries(ALL_FIELDS.map((field) => [field, ""]));
+  source.DeploymentID = session.deploymentId;
+  source.EventID = `${session.deploymentId}-E${String(index + 1).padStart(4, "0")}`;
+  source.EventTime = group.map((item) => item.lastModified).filter(Boolean).sort()[0] || session.createdAt;
+  source.SamplingStratum = "web_upload";
+  source.AuditRandom = "0";
+  source.ChallengeReasons = photos.length === 3 && video ? "" : "incomplete_pairing";
+  source.SourceType = "web_upload";
+  source.SourceRelativePaths = group.map((item) => item.relativePath).join(";");
+  source.MediaSha256 = group.map((item) => `${item.filename}=${item.serverSha256}`).join(";");
+  source.Photo1 = photos[0]?.mediaToken || "";
+  source.Photo2 = photos[1]?.mediaToken || "";
+  source.Photo3 = photos[2]?.mediaToken || "";
+  source.Video = video?.mediaToken || "";
+  source.AIStatus = "AI_PENDING";
+  source.ReviewStatus = "NEEDS_REVIEW";
+  source.TaxonomyVersion = "taxonomy_v1.0";
+  source.SchemaVersion = "2.1";
+  return initializeEvent(source, source, "web");
+}
+
+async function finalizeImportSession(session) {
+  if (session.status === "COMPLETE") return session;
+  const missing = session.media.filter((item) => !item.uploaded);
+  if (missing.length) throw requestError(409, `仍有 ${missing.length} 個檔案尚未上傳完成。`);
+  const groups = groupImportedMedia(session.media);
+  if (!groups.length) throw requestError(400, "沒有可建立的事件。");
+  const importedEvents = groups.map((group, index) => importedEventFromGroup(session, group, index));
+  const existingIds = new Set(events.map((event) => event.EventID));
+  if (importedEvents.some((event) => existingIds.has(event.EventID))) throw requestError(409, "匯入事件編號與既有資料重複。");
+  events.push(...importedEvents);
+  try {
+    for (const event of importedEvents) registerEventMedia(event);
+    await persistEvents("web");
+    session.status = "COMPLETE";
+    session.completedAt = new Date().toISOString();
+    session.eventIds = importedEvents.map((event) => event.EventID);
+    await persistImportSession(session);
+    return session;
+  } catch (error) {
+    events.splice(events.length - importedEvents.length, importedEvents.length);
+    for (const item of session.media) mediaPaths.delete(item.mediaToken);
+    throw error;
+  }
 }
 
 async function serveStatic(request, response, pathname) {
@@ -323,14 +658,9 @@ async function serveMedia(request, response, encodedName) {
     textResponse(response, 400, "Bad media path");
     return;
   }
-  if (!knownMedia.has(filename) || path.basename(filename) !== filename) {
+  const resolved = mediaPaths.get(filename);
+  if (!resolved) {
     textResponse(response, 404, "Unknown media");
-    return;
-  }
-  const mediaRoot = path.resolve(config.mediaRoot);
-  const resolved = path.resolve(mediaRoot, filename);
-  if (!resolved.startsWith(`${mediaRoot}${path.sep}`)) {
-    textResponse(response, 403, "Forbidden");
     return;
   }
   try {
@@ -531,10 +861,9 @@ async function stageEventMedia(event, inputRoot) {
   for (const field of ["Photo1", "Photo2", "Photo3", "Video"]) {
     const filename = event[field];
     if (!filename) continue;
-    if (!knownMedia.has(filename) || path.basename(filename) !== filename) throw new Error(`拒絕未知媒體：${filename}`);
-    const source = path.resolve(config.mediaRoot, filename);
-    const target = path.resolve(inputRoot, `${field}-${filename}`);
-    if (!source.startsWith(`${path.resolve(config.mediaRoot)}${path.sep}`)) throw new Error(`媒體路徑超出允許範圍：${filename}`);
+    const source = mediaPaths.get(filename);
+    if (!source) throw new Error(`拒絕未知媒體：${filename}`);
+    const target = path.resolve(inputRoot, `${field}-${path.basename(filename)}`);
     try {
       await link(source, target);
     } catch (linkError) {
@@ -557,7 +886,7 @@ async function runAiJob(job, event) {
   job.message = "正在準備事件媒體…";
   event.AIStatus = "AI_RUNNING";
   event.AIError = "";
-  saveQueue = saveQueue.then(persistEvents, persistEvents);
+  saveQueue = saveQueue.then(() => persistEvent(event), () => persistEvent(event));
   await saveQueue;
   try {
     const jobsRoot = path.resolve(config.ai.jobsRoot);
@@ -611,8 +940,8 @@ async function runAiJob(job, event) {
     job.message = "AI 推論失敗；人工答案未被修改。";
   } finally {
     job.finishedAt = new Date().toISOString();
-    event.SchemaVersion = "2.0";
-    saveQueue = saveQueue.then(persistEvents, persistEvents);
+    event.SchemaVersion = "2.1";
+    saveQueue = saveQueue.then(() => persistEvent(event), () => persistEvent(event));
     await saveQueue;
   }
 }
@@ -679,7 +1008,14 @@ const server = http.createServer(async (request, response) => {
         auditLog: config.auditLog,
         mediaRoot: config.mediaRoot,
         photoFirstWorkflow: true,
-        schemaVersion: "2.0",
+        schemaVersion: "2.1",
+        webUpload: {
+          enabled: true,
+          maxFilesPerImport: config.webUploads.maxFilesPerImport,
+          maxFileBytes: config.webUploads.maxFileBytes,
+          eventGapSeconds: config.webUploads.eventGapSeconds,
+          acceptedExtensions: [...UPLOAD_EXTENSIONS],
+        },
         inferenceAvailable: runtime.ready,
         aiRuntime: runtime,
       });
@@ -699,11 +1035,37 @@ const server = http.createServer(async (request, response) => {
       jsonResponse(response, 200, { taxonomy });
     } else if (request.method === "GET" && url.pathname === "/api/status") {
       jsonResponse(response, 200, statusSummary());
+    } else if (request.method === "POST" && url.pathname === "/api/imports") {
+      const body = await readRequestBody(request, 10_000_000);
+      const session = await createImportSession(body);
+      jsonResponse(response, 201, { ok: true, import: publicImportSession(session) });
+    } else if (request.method === "GET" && /^\/api\/imports\/[^/]+$/.test(url.pathname)) {
+      const importId = decodeURIComponent(url.pathname.slice("/api/imports/".length));
+      const session = await getImportSession(importId);
+      if (!session) jsonResponse(response, 404, { ok: false, error: "找不到匯入工作。" });
+      else jsonResponse(response, 200, { ok: true, import: publicImportSession(session) });
+    } else if (request.method === "POST" && /^\/api\/imports\/[^/]+\/files\/\d+$/.test(url.pathname)) {
+      const match = /^\/api\/imports\/([^/]+)\/files\/(\d+)$/.exec(url.pathname);
+      const importId = decodeURIComponent(match[1]);
+      const session = await getImportSession(importId);
+      if (!session) throw requestError(404, "找不到匯入工作。");
+      const item = await receiveImportFile(request, session, Number(match[2]));
+      jsonResponse(response, 200, {
+        ok: true,
+        import: publicImportSession(session),
+        file: { index: item.index, filename: item.filename, sha256: item.serverSha256 },
+      });
+    } else if (request.method === "POST" && /^\/api\/imports\/[^/]+\/finalize$/.test(url.pathname)) {
+      const importId = decodeURIComponent(url.pathname.slice("/api/imports/".length, -"/finalize".length));
+      const session = await getImportSession(importId);
+      if (!session) throw requestError(404, "找不到匯入工作。");
+      await finalizeImportSession(session);
+      jsonResponse(response, 201, { ok: true, import: publicImportSession(session), status: statusSummary() });
     } else if (request.method === "GET" && url.pathname === "/api/export.csv") {
       const csv = stringifyCsv(events, ALL_FIELDS);
       response.writeHead(200, {
         "Content-Type": "text/csv; charset=utf-8",
-        "Content-Disposition": `attachment; filename="${config.deploymentId}_annotations_working.csv"`,
+        "Content-Disposition": "attachment; filename=\"camera_trap_events.csv\"",
         "Content-Length": Buffer.byteLength(csv),
         "Cache-Control": "no-store",
       });
@@ -734,13 +1096,13 @@ const server = http.createServer(async (request, response) => {
       for (const field of EDITABLE_FIELDS) {
         if (field in body) event[field] = String(body[field] ?? "");
       }
-      event.SchemaVersion = "2.0";
+      event.SchemaVersion = "2.1";
       event.LastModifiedAt = new Date().toISOString();
       event.LastModifiedBy = event.Annotator || event.SecondReviewer || event.Adjudicator || "UNKNOWN";
       if (["HUMAN_CONFIRMED", "UNCERTAIN", "CONFLICT", "double_checked", "adjudicated"].includes(event.ReviewStatus)) {
         event.ReviewedAt = event.LastModifiedAt;
       }
-      saveQueue = saveQueue.then(persistEvents, persistEvents);
+      saveQueue = saveQueue.then(() => persistEvent(event), () => persistEvent(event));
       await saveQueue;
       await appendAuditEntry(before, event);
       jsonResponse(response, 200, { ok: true, event: publicEvent(event), status: statusSummary() });
@@ -752,8 +1114,11 @@ const server = http.createServer(async (request, response) => {
       textResponse(response, 405, "Method not allowed");
     }
   } catch (error) {
-    console.error(error);
-    jsonResponse(response, 500, { ok: false, error: "伺服器處理失敗。", detail: error.message });
+    const statusCode = Number(error.statusCode) || 500;
+    if (statusCode >= 500) console.error(error);
+    jsonResponse(response, statusCode, statusCode >= 500
+      ? { ok: false, error: "伺服器處理失敗。", detail: error.message }
+      : { ok: false, error: error.message });
   }
 });
 

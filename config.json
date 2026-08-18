@@ -1,5 +1,5 @@
 {
-  "appName": "野生動物事件判讀台",
+  "appName": "野生動物辨識成果台",
   "deploymentId": "CAM023-2026-08-A",
   "port": 4173,
   "manifestCsv": "D:\\CameraTrap_Gold_v1\\04_annotations\\CAM023-2026-08-A_gold_annotation_events_v1.0.csv",
@@ -7,6 +7,15 @@
   "auditLog": "D:\\CameraTrap_Gold_v1\\04_annotations\\CAM023-2026-08-A_annotation_audit_v2.0.jsonl",
   "mediaRoot": "D:\\CameraTrap_Gold_v1\\01_annotation_working\\LOC001\\CAM023-2026-08-A",
   "taxonomyJson": "taxonomy.json",
+  "allowedBrowserOrigins": [
+    "https://nexusintelligent.github.io"
+  ],
+  "webUploads": {
+    "root": "%LOCALAPPDATA%\\CameraTrapReviewer\\web-uploads",
+    "maxFilesPerImport": 5000,
+    "maxFileBytes": 4294967296,
+    "eventGapSeconds": 120
+  },
   "ai": {
     "pythonPath": "%LOCALAPPDATA%\\CameraTrapReviewer\\Python311\\python.exe",
     "modelCacheRoot": "%LOCALAPPDATA%\\CameraTrapReviewer\\model-cache",

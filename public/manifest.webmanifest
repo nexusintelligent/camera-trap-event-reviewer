@@ -1,8 +1,8 @@
 {
   "id": "./",
-  "name": "野生動物事件判讀台",
-  "short_name": "事件判讀台",
-  "description": "以事件為單位進行相機陷阱照片與影片判讀、標註及品質覆核。",
+  "name": "野生動物辨識成果台",
+  "short_name": "辨識成果台",
+  "description": "上傳相機陷阱媒體、建立事件、查看 AI 辨識成果並匯出資料。",
   "lang": "zh-Hant",
   "start_url": "./",
   "scope": "./",
