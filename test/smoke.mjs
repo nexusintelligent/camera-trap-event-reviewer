@@ -21,6 +21,14 @@ assert.match(pageHtml, /id="import-dialog"/);
 assert.match(pageHtml, /id="human-label-options"/);
 assert.match(pageHtml, /id="ai-section"/);
 assert.match(pageHtml, /id="start-ai-button"/);
+assert.match(pageHtml, /id="start-ai-batch-button"/);
+assert.match(pageHtml, /id="pause-ai-batch-button"/);
+assert.match(pageHtml, /id="reset-ai-workspace-button"/);
+assert.match(pageHtml, /id="clear-upload-workspace-button"/);
+assert.match(pageHtml, /id="identify-species-toggle"/);
+assert.match(pageHtml, /id="clear-import-button"/);
+assert.match(pageHtml, /id="upload-view"/);
+assert.match(pageHtml, /id="review-view"/);
 assert.match(pageHtml, /id="import-deployment-name"/);
 assert.match(pageHtml, /上傳並建立事件/);
 checks.push("pwa:html-metadata");
@@ -75,8 +83,9 @@ checks.push("security:origin-rejected");
 const health = await json("/api/health");
 assert.equal(health.response.status, 200);
 assert.equal(health.body.ok, true);
-assert.equal(health.body.events, 154);
-checks.push("health:154-events");
+assert.equal(health.body.registeredEvents, 154);
+assert.equal(health.body.events, health.body.registeredEvents + health.body.webEvents);
+checks.push("health:review-and-upload-sources-separated");
 
 const configPayload = await json("/api/config");
 assert.equal(configPayload.response.status, 200);
@@ -102,6 +111,36 @@ assert.equal(typeof aiStatus.body.runtime?.ready, "boolean");
 assert.ok(["READY", "NOT_INSTALLED", "BROKEN"].includes(aiStatus.body.runtime?.status));
 checks.push("ai:runtime-status");
 
+const aiBatch = await json("/api/ai/batch?identifySpecies=0&mode=fast");
+assert.equal(aiBatch.response.status, 200);
+assert.equal(aiBatch.body.status.total, health.body.webEvents);
+assert.equal(typeof aiBatch.body.status.active, "boolean");
+assert.equal(typeof aiBatch.body.status.paused, "boolean");
+assert.equal(aiBatch.body.status.identifySpecies, false);
+assert.equal(aiBatch.body.status.mode, "fast");
+checks.push("ai:batch-status");
+
+const aiBatchSpecies = await json("/api/ai/batch?identifySpecies=1&mode=full");
+assert.equal(aiBatchSpecies.response.status, 200);
+assert.equal(aiBatchSpecies.body.status.total, health.body.webEvents);
+assert.equal(aiBatchSpecies.body.status.identifySpecies, true);
+assert.equal(aiBatchSpecies.body.status.mode, "full");
+checks.push("ai:independent-species-option");
+
+const rejectedReset = await json("/api/ai/reset", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: "{}",
+});
+assert.equal(rejectedReset.response.status, 400);
+const rejectedClear = await json("/api/workspace/clear", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: "{}",
+});
+assert.equal(rejectedClear.response.status, 400);
+checks.push("safety:destructive-controls-require-confirmation");
+
 const invalidAiJob = await json("/api/ai/jobs", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
@@ -112,8 +151,10 @@ checks.push("ai:invalid-job-rejected");
 
 const eventPayload = await json("/api/events");
 assert.equal(eventPayload.response.status, 200);
-assert.equal(eventPayload.body.events.length, 154);
-const first = eventPayload.body.events[0];
+assert.equal(eventPayload.body.events.length, health.body.events);
+const registeredEvents = eventPayload.body.events.filter((event) => event.SourceType !== "web_upload");
+assert.equal(registeredEvents.length, 154);
+const first = registeredEvents[0];
 assert.ok(first.EventID);
 assert.ok(first.media.Photo1);
 assert.equal(first.SchemaVersion, "2.1");

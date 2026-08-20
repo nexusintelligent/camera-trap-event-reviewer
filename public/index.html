@@ -24,12 +24,16 @@
         <h1 id="app-title">野生動物辨識成果台</h1>
       </div>
     </div>
+    <nav class="primary-tabs" aria-label="主要功能">
+      <button class="primary-tab active" id="upload-tab" type="button" aria-selected="true">上傳與 AI 初篩</button>
+      <button class="primary-tab" id="review-tab" type="button" aria-selected="false">人工覆核 <span id="review-tab-count">154</span></button>
+    </nav>
     <div class="top-actions">
       <button class="button ghost" id="open-import-button" type="button">上傳媒體</button>
       <button class="button ghost install-button" id="install-app-button" type="button" hidden>安裝應用程式</button>
-      <div class="save-state" id="save-state"><span></span>尚未修改</div>
+      <div class="save-state review-only" id="save-state"><span></span>尚未修改</div>
       <a class="button ghost" id="export-link" href="#">匯出成果 CSV</a>
-      <button class="button primary" id="save-button" type="button">儲存 <kbd>Ctrl</kbd>+<kbd>S</kbd></button>
+      <button class="button primary review-only" id="save-button" type="button">儲存 <kbd>Ctrl</kbd>+<kbd>S</kbd></button>
     </div>
   </header>
 
@@ -41,7 +45,84 @@
     <button class="button ghost" id="retry-connection-button" type="button">重新連線</button>
   </div>
 
-  <div class="app-shell">
+  <main class="upload-workspace" id="upload-view">
+    <section class="upload-hero">
+      <div>
+        <div class="eyebrow">UPLOAD · AI TRIAGE</div>
+        <h2>上傳照片，先完成快速初篩</h2>
+        <p>這裡只負責新增媒體與執行 AI。原有 154 組黃金資料及人工標註工具已移至「人工覆核」分頁。</p>
+      </div>
+      <button class="button primary upload-hero-button" id="open-import-home-button" type="button">選擇照片或資料夾</button>
+    </section>
+
+    <section class="upload-dashboard">
+      <article class="upload-card import-launch-card">
+        <div class="card-kicker">01 · 新增媒體</div>
+        <h3>從電腦選擇照片與影片</h3>
+        <p>支援單檔、多選或整個資料夾。系統會依檔名與時間整理為事件，原始檔不會被修改。</p>
+        <button class="upload-drop-button" id="open-import-card-button" type="button">
+          <strong>＋ 上傳媒體</strong>
+          <span>最多約 999 個檔案，可建立三百多組事件</span>
+        </button>
+      </article>
+
+      <article class="upload-card ai-triage-card">
+        <div class="card-kicker">02 · AI 快速初篩</div>
+        <div class="triage-heading">
+          <div>
+            <h3>空觸發或需要辨識物種</h3>
+            <p>動物會送往後續物種覆核；人或車輛會保留為非空觸發，避免被錯誤歸為空拍。</p>
+          </div>
+          <span class="status-pill" id="batch-state-pill">尚未執行</span>
+        </div>
+
+        <div class="upload-stat-grid">
+          <div><span>上傳事件</span><strong id="upload-total">0</strong></div>
+          <div><span>AI 已完成</span><strong id="upload-ai-complete">0</strong></div>
+          <div><span>空觸發</span><strong id="upload-empty">0</strong></div>
+          <div><span>動物事件</span><strong id="upload-needs-species">0</strong></div>
+        </div>
+
+        <fieldset class="ai-goal-picker">
+          <legend>成果需求</legend>
+          <label>
+            <input id="identify-species-toggle" type="checkbox">
+            <span><strong>需要辨識物種</strong><small>先判斷是否空觸發；只有偵測到動物時才接續 SpeciesNet，結果以中文候選名稱顯示。</small></span>
+          </label>
+          <p id="ai-goal-note">目前只判斷空觸發、動物、人與車輛，不執行物種辨識。</p>
+        </fieldset>
+
+        <fieldset class="ai-mode-picker">
+          <legend>辨識速度</legend>
+          <label>
+            <input type="radio" name="ai-mode" value="fast" checked>
+            <span><strong>快速初篩</strong><small>只分析第 1、3 張照片，不讀影片；建議用於整批處理。</small></span>
+          </label>
+          <label>
+            <input type="radio" name="ai-mode" value="full">
+            <span><strong>完整辨識</strong><small>分析三張照片；勾選物種時也納入影片與 SpeciesNet。</small></span>
+          </label>
+        </fieldset>
+
+        <div class="batch-actions">
+          <button class="button primary" id="start-ai-batch-button" type="button" disabled>一鍵辨識全部尚未完成</button>
+          <button class="button warm" id="pause-ai-batch-button" type="button" disabled>完成目前這組後暫停</button>
+          <button class="button ghost" id="reset-ai-workspace-button" type="button" disabled>重置 AI 結果</button>
+          <button class="button danger-outline" id="clear-upload-workspace-button" type="button" disabled>清除上傳事件</button>
+        </div>
+        <div class="ai-batch-panel" id="ai-batch-panel">
+          <div>
+            <strong>上傳事件辨識進度</strong>
+            <span id="ai-batch-summary">正在讀取佇列狀態…</span>
+          </div>
+          <progress id="ai-batch-progress" value="0" max="1">0%</progress>
+          <small id="ai-batch-current">尚未啟動批次工作</small>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <div class="app-shell" id="review-view" hidden>
     <aside class="sidebar">
       <section class="progress-panel">
         <div class="progress-label"><span>覆核進度</span><strong id="progress-text">0 / 0</strong></div>
@@ -155,7 +236,7 @@
             <strong id="ai-runtime-label">正在檢查本機 AI 環境…</strong>
             <span>模型只在本機處理媒體；第一次執行需要下載官方權重。</span>
           </div>
-          <button class="button primary" id="start-ai-button" type="button" disabled>開始辨識目前事件</button>
+          <button class="button" id="start-ai-button" type="button" disabled>辨識目前事件</button>
         </div>
         <div class="ai-notice" id="ai-notice">正在檢查 MegaDetector／SpeciesNet 執行環境。</div>
         <pre class="ai-job-log hidden" id="ai-job-log" aria-live="polite"></pre>
@@ -295,7 +376,7 @@
   <dialog id="import-dialog" class="import-dialog">
     <div class="dialog-head">
       <div>
-        <div class="eyebrow">WEB UPLOAD · V2.1</div>
+        <div class="eyebrow">WEB UPLOAD · V2.5</div>
         <h2>上傳媒體並建立事件</h2>
       </div>
       <button id="close-import-dialog" type="button" aria-label="關閉">×</button>
@@ -321,6 +402,7 @@
       <div class="import-preview" id="import-preview"></div>
       <div class="import-actions">
         <span>完成後會自動依資料夾、拍攝時間及「3 張照片＋1 段影片」規則建立事件。</span>
+        <button class="button ghost" id="clear-import-button" type="button" disabled>清除已選檔案</button>
         <button class="button primary" id="prepare-job-button" type="button" disabled>上傳並建立事件</button>
       </div>
       <pre class="job-result" id="job-result" hidden></pre>

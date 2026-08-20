@@ -5,6 +5,7 @@ node_modules/
 .python311/
 .pip-cache/
 ai_jobs/
+local-data/
 dist/
 *.pt
 *.pth

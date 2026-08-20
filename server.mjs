@@ -1,6 +1,6 @@
 import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, copyFile, link, mkdir, open, readFile, rename, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, link, mkdir, open, readFile, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import http from "node:http";
 import path from "node:path";
@@ -53,6 +53,92 @@ config.webUploads.eventsCsv = path.resolve(ROOT, expandEnvironmentVariables(
 config.webUploads.maxFilesPerImport = Number(config.webUploads.maxFilesPerImport ?? 5000);
 config.webUploads.maxFileBytes = Number(config.webUploads.maxFileBytes ?? 4_294_967_296);
 config.webUploads.eventGapSeconds = Number(config.webUploads.eventGapSeconds ?? 120);
+const AI_TRIAGE_VERSION = `triage-v1.2@${config.ai.detectionThresholdForClassification}`;
+
+const configuredWorkingCsv = path.resolve(ROOT, config.workingCsv);
+const configuredAuditLog = path.resolve(ROOT, config.auditLog);
+config.workingCsv = configuredWorkingCsv;
+config.auditLog = configuredAuditLog;
+config.storageMode = "configured";
+config.storageNotice = "";
+
+async function prepareWritableAnnotationStorage() {
+  const directory = path.dirname(configuredWorkingCsv);
+  const probe = path.join(directory, `.camera-trap-write-probe-${process.pid}-${Date.now()}`);
+  try {
+    await mkdir(directory, { recursive: true });
+    await writeFile(probe, "", { encoding: "utf8", flag: "wx" });
+    await unlink(probe);
+  } catch (error) {
+    await unlink(probe).catch(() => {});
+    if (!["EACCES", "EPERM", "EROFS"].includes(error?.code)) throw error;
+
+    const fallbackRoot = path.join(ROOT, "local-data");
+    const fallbackWorkingCsv = path.join(fallbackRoot, path.basename(configuredWorkingCsv));
+    const fallbackAuditLog = path.join(fallbackRoot, path.basename(configuredAuditLog));
+    await mkdir(fallbackRoot, { recursive: true });
+    if (!existsSync(fallbackWorkingCsv) && existsSync(configuredWorkingCsv)) {
+      await copyFile(configuredWorkingCsv, fallbackWorkingCsv);
+    }
+    config.workingCsv = fallbackWorkingCsv;
+    config.auditLog = fallbackAuditLog;
+    config.storageMode = "local-fallback";
+    config.storageNotice = "Configured annotation storage is read-only; using a local working copy.";
+  }
+}
+
+await prepareWritableAnnotationStorage();
+
+async function prepareWritableAiJobsStorage() {
+  const configuredJobsRoot = path.resolve(config.ai.jobsRoot);
+  const probe = path.join(configuredJobsRoot, `.camera-trap-write-probe-${process.pid}-${Date.now()}`);
+  config.ai.jobsRoot = configuredJobsRoot;
+  config.ai.jobsStorageMode = "configured";
+  try {
+    await mkdir(configuredJobsRoot, { recursive: true });
+    await writeFile(probe, "", { encoding: "utf8", flag: "wx" });
+    await unlink(probe);
+  } catch (error) {
+    await unlink(probe).catch(() => {});
+    if (!["EACCES", "EPERM", "EROFS"].includes(error?.code)) throw error;
+    config.ai.jobsRoot = path.join(ROOT, "local-data", "ai-jobs");
+    config.ai.jobsStorageMode = "local-fallback";
+    await mkdir(config.ai.jobsRoot, { recursive: true });
+  }
+}
+
+await prepareWritableAiJobsStorage();
+
+async function prepareWritableWebUploadStorage() {
+  const configuredRoot = path.resolve(config.webUploads.root);
+  const configuredEventsCsv = path.resolve(config.webUploads.eventsCsv);
+  const probe = path.join(configuredRoot, `.camera-trap-write-probe-${process.pid}-${Date.now()}`);
+  config.webUploads.storageMode = "configured";
+  config.webUploads.storageNotice = "";
+  try {
+    await mkdir(configuredRoot, { recursive: true });
+    await writeFile(probe, "", { encoding: "utf8", flag: "wx" });
+    await unlink(probe);
+  } catch (error) {
+    await unlink(probe).catch(() => {});
+    if (!["EACCES", "EPERM", "EROFS"].includes(error?.code)) throw error;
+
+    const fallbackRoot = path.join(ROOT, "local-data", "web-uploads");
+    const fallbackEventsCsv = path.join(fallbackRoot, path.basename(configuredEventsCsv));
+    await mkdir(fallbackRoot, { recursive: true });
+    if (!existsSync(fallbackEventsCsv) && existsSync(configuredEventsCsv)) {
+      await copyFile(configuredEventsCsv, fallbackEventsCsv);
+    }
+    config.webUploads.root = fallbackRoot;
+    config.webUploads.mediaRoot = path.join(fallbackRoot, "media");
+    config.webUploads.sessionsRoot = path.join(fallbackRoot, "sessions");
+    config.webUploads.eventsCsv = fallbackEventsCsv;
+    config.webUploads.storageMode = "local-fallback";
+    config.webUploads.storageNotice = "Configured web-upload storage is read-only; using project-local storage.";
+  }
+}
+
+await prepareWritableWebUploadStorage();
 
 const IMMUTABLE_FIELDS = [
   "DeploymentID", "EventID", "EventTime", "SamplingStratum", "AuditRandom",
@@ -117,7 +203,18 @@ let saveQueue = Promise.resolve();
 let aiRunQueue = Promise.resolve();
 let aiRuntimeStatus = null;
 const aiJobs = new Map();
+let aiQueuePaused = false;
+let aiResumeWaiters = [];
+let aiBatchPreference = { mode: "fast", identifySpecies: false };
 const importSessions = new Map();
+
+function isWebWorkspaceEvent(event) {
+  return event?._source === "web" || event?.SourceType === "web_upload";
+}
+
+function webWorkspaceEvents() {
+  return events.filter(isWebWorkspaceEvent);
+}
 
 function isAllowedBrowserOrigin(origin) {
   if (!origin) return false;
@@ -255,6 +352,12 @@ async function loadState() {
     return initializeEvent(row, row, "web");
   });
   events = [...registeredEvents, ...webEvents];
+  for (const event of events) {
+    if (event.AIStatus === "AI_RUNNING") {
+      event.AIStatus = "AI_PENDING";
+      event.AIError = "上次服務中斷；可由批次辨識自動接續。";
+    }
+  }
   mediaPaths = new Map();
   for (const event of events) registerEventMedia(event);
   taxonomy = JSON.parse(await readFile(config.taxonomyJson, "utf8"));
@@ -458,6 +561,19 @@ async function getImportSession(importId) {
   if (session.importId !== importId || !Array.isArray(session.media)) throw requestError(409, "匯入工作紀錄損壞。");
   importSessions.set(importId, session);
   return session;
+}
+
+async function cancelImportSession(session) {
+  if (session.status === "COMPLETE") {
+    throw requestError(409, "此批次已建立事件；請改用「清除上傳工作區」。");
+  }
+  const importMediaRoot = pathInside(config.webUploads.mediaRoot, session.importId);
+  const sessionFile = pathInside(config.webUploads.sessionsRoot, `${session.importId}.json`);
+  await rm(importMediaRoot, { recursive: true, force: true });
+  await unlink(sessionFile).catch((error) => {
+    if (error?.code !== "ENOENT") throw error;
+  });
+  importSessions.delete(session.importId);
 }
 
 async function createImportSession(body) {
@@ -770,6 +886,8 @@ function publicAiJob(job) {
     finishedAt: job.finishedAt || "",
     message: job.message || "",
     error: job.error || "",
+    mode: job.mode || "full",
+    identifySpecies: Boolean(job.identifySpecies),
     logTail: (job.log || "").slice(-4000),
   };
 }
@@ -800,12 +918,25 @@ function classificationEntry(entry, categories) {
   return { label: String(entry || ""), score: 0 };
 }
 
-function readableTaxon(label) {
+function normalizedTaxonText(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLocaleLowerCase("en")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function localizedTaxonName(label) {
   const parts = String(label || "").split(";").map((part) => part.trim()).filter(Boolean);
-  const leaf = String(parts.at(-1) || "").toLowerCase();
+  const leaf = normalizedTaxonText(parts.at(-1));
   if (["", "blank", "empty", "background", "person", "human", "vehicle", "animal"].includes(leaf)) return "";
-  if (parts.length >= 2) return `${parts.at(-1)} (${parts.at(-2)})`;
-  return parts[0] || "";
+  const normalizedParts = new Set(parts.map(normalizedTaxonText).filter(Boolean));
+  const match = taxonomy.find((taxon) => {
+    const scientific = normalizedTaxonText(taxon.scientificName);
+    const code = normalizedTaxonText(taxon.taxonCode);
+    return (scientific && normalizedParts.has(scientific)) || (code && normalizedParts.has(code));
+  });
+  return match?.commonName || "未知動物（待人工確認）";
 }
 
 function collectDetections(result) {
@@ -825,19 +956,21 @@ function collectDetections(result) {
   return records;
 }
 
-function summarizeAiResult(result) {
+function summarizeAiResult(result, presenceThreshold = 0.15) {
   const detectionCategories = result.detection_categories || { "1": "animal", "2": "person", "3": "vehicle" };
   const classificationCategories = result.classification_categories || {};
   const labels = new Set();
   const species = new Set();
   let confidence = 0;
   for (const detection of collectDetections(result)) {
+    const detectionConfidence = Number(detection.conf ?? detection.score ?? 0);
+    confidence = Math.max(confidence, detectionConfidence);
+    if (detectionConfidence < presenceThreshold) continue;
     const label = detectionLabel(detection, detectionCategories);
     if (label) labels.add(label);
-    confidence = Math.max(confidence, Number(detection.conf ?? detection.score ?? 0));
     if (label === "animal" && Array.isArray(detection.classifications) && detection.classifications.length) {
       const top = classificationEntry(detection.classifications[0], classificationCategories);
-      const name = readableTaxon(top.label);
+      const name = localizedTaxonName(top.label);
       if (name) species.add(name);
       confidence = Math.max(confidence, top.score);
     }
@@ -856,9 +989,36 @@ function summarizeAiResult(result) {
   };
 }
 
-async function stageEventMedia(event, inputRoot) {
+function normalizeAiMode(value, fallback = "full") {
+  return value === "fast" || value === "full" ? value : fallback;
+}
+
+function normalizeIdentifySpecies(value, fallback = false) {
+  if ([true, 1, "1", "true", "yes"].includes(value)) return true;
+  if ([false, 0, "0", "false", "no"].includes(value)) return false;
+  return fallback;
+}
+
+function setAiQueuePaused(paused) {
+  aiQueuePaused = Boolean(paused);
+  if (!aiQueuePaused) {
+    const waiters = aiResumeWaiters;
+    aiResumeWaiters = [];
+    for (const resolve of waiters) resolve();
+  }
+}
+
+async function waitForAiQueueResume() {
+  if (!aiQueuePaused) return;
+  await new Promise((resolve) => aiResumeWaiters.push(resolve));
+}
+
+async function stageEventMedia(event, inputRoot, mode = "full", identifySpecies = false) {
   await mkdir(inputRoot, { recursive: true });
-  for (const field of ["Photo1", "Photo2", "Photo3", "Video"]) {
+  const fields = mode === "fast"
+    ? ["Photo1", "Photo3"]
+    : (identifySpecies ? ["Photo1", "Photo2", "Photo3", "Video"] : ["Photo1", "Photo2", "Photo3"]);
+  for (const field of fields) {
     const filename = event[field];
     if (!filename) continue;
     const source = mediaPaths.get(filename);
@@ -881,6 +1041,12 @@ async function stageEventMedia(event, inputRoot) {
 }
 
 async function runAiJob(job, event) {
+  if (job.cancelRequested) {
+    job.status = "CANCELLED";
+    job.finishedAt = new Date().toISOString();
+    job.message = "工作已取消。";
+    return;
+  }
   job.status = "AI_RUNNING";
   job.startedAt = new Date().toISOString();
   job.message = "正在準備事件媒體…";
@@ -896,48 +1062,87 @@ async function runAiJob(job, event) {
     const resultFile = path.join(jobRoot, "result.json");
     const kaggleCacheRoot = path.join(config.ai.modelCacheRoot, "kagglehub");
     await mkdir(kaggleCacheRoot, { recursive: true });
-    await stageEventMedia(event, inputRoot);
-    job.message = "MegaDetector 與 SpeciesNet 推論中；第一次執行會下載官方模型權重…";
-    const args = [
-      "-m", "megadetector.detection.run_md_and_speciesnet",
-      inputRoot, resultFile,
-      "--detector_model", config.ai.detectorModel,
-      "--detection_confidence_threshold_for_classification", String(config.ai.detectionThresholdForClassification),
-      "--detection_confidence_threshold_for_output", String(config.ai.detectionThresholdForOutput),
-      "--time_sample", String(config.ai.timeSampleSeconds),
-      "--include_raw_classifications",
-    ];
-    if (config.ai.country) args.push("--country", config.ai.country);
+    const identifySpecies = Boolean(job.identifySpecies);
+    await stageEventMedia(event, inputRoot, job.mode, identifySpecies);
+    const fastMode = job.mode === "fast";
+    job.message = identifySpecies
+      ? (fastMode
+        ? "快速模式：判斷空觸發，動物事件繼續辨識物種…"
+        : "完整模式：判斷空觸發，動物事件繼續辨識物種與影片…")
+      : (fastMode
+        ? "快速初篩中：只判斷第 1、3 張照片是否為空觸發…"
+        : "完整初篩中：以三張照片判斷是否為空觸發…");
+    const args = !identifySpecies
+      ? [
+        "-m", "megadetector.detection.run_detector_batch",
+        config.ai.detectorModel, inputRoot, resultFile,
+        "--recursive", "--output_relative_filenames", "--include_max_conf",
+        "--threshold", String(config.ai.detectionThresholdForClassification),
+        "--ncores", "2",
+      ]
+      : [
+        "-m", "megadetector.detection.run_md_and_speciesnet",
+        inputRoot, resultFile,
+        "--detector_model", config.ai.detectorModel,
+        "--detection_confidence_threshold_for_classification", String(config.ai.detectionThresholdForClassification),
+        "--detection_confidence_threshold_for_output", String(config.ai.detectionThresholdForOutput),
+        "--time_sample", String(config.ai.timeSampleSeconds),
+        "--include_raw_classifications",
+      ];
+    if (identifySpecies && config.ai.country) args.push("--country", config.ai.country);
     const processResult = await runProcess(config.ai.pythonPath, args, {
       env: { KAGGLEHUB_CACHE: kaggleCacheRoot },
       onOutput: (chunk) => { job.log = `${job.log || ""}${chunk}`.slice(-100_000); },
     });
     await writeFile(path.join(jobRoot, "inference.log"), `${processResult.stdout}\n${processResult.stderr}`, "utf8");
+    if (job.cancelRequested) {
+      job.status = "CANCELLED";
+      job.message = "工作已取消；辨識結果未寫入。";
+      return;
+    }
     if (processResult.code !== 0) throw new Error(processResult.stderr.slice(-2000) || `AI 程序結束碼 ${processResult.code}`);
     const rawResult = JSON.parse(await readFile(resultFile, "utf8"));
-    const summary = summarizeAiResult(rawResult);
+    const summary = summarizeAiResult(rawResult, config.ai.detectionThresholdForClassification);
     event.AIStatus = "AI_COMPLETE";
-    event.AIEventLabels = summary.labels.join(";");
-    event.AISpecies = summary.species.join(";");
+    event.AIEventLabels = summary.labels.length ? summary.labels.join(";") : "empty";
+    event.AISpecies = identifySpecies ? summary.species.join(";") : "";
     event.AIConfidence = summary.confidence;
-    event.AIModelName = "MegaDetector + SpeciesNet";
-    event.AIModelVersion = `MegaDetector ${config.ai.megadetectorVersion} (${config.ai.detectorModel}); SpeciesNet ${config.ai.speciesnetVersion}`;
+    event.AIModelName = identifySpecies ? "MegaDetector + SpeciesNet" : "MegaDetector 空觸發初篩";
+    event.AIModelVersion = [
+      `MegaDetector ${config.ai.megadetectorVersion} (${config.ai.detectorModel})`,
+      identifySpecies ? `SpeciesNet ${config.ai.speciesnetVersion}` : "SpeciesNet skipped",
+      `mode=${job.mode}`,
+      `species=${identifySpecies ? "yes" : "no"}`,
+      AI_TRIAGE_VERSION,
+    ].join("; ");
     event.AIProcessedAt = new Date().toISOString();
     event.AIError = summary.failures.join("; ");
     if (event.HumanLabels && normalizedLabelSet(event.HumanLabels) !== normalizedLabelSet(event.AIEventLabels)) {
       event.ReviewStatus = "CONFLICT";
+    } else if (event.HumanLabels && event.ReviewStatus === "CONFLICT") {
+      event.ReviewStatus = "HUMAN_CONFIRMED";
     } else if (!event.HumanLabels && !event.ReviewStatus) {
       event.ReviewStatus = "NEEDS_REVIEW";
     }
     job.status = "AI_COMPLETE";
-    job.message = `完成：${event.AIEventLabels}${event.AISpecies ? ` · ${event.AISpecies}` : ""}`;
+    const triage = event.AIEventLabels.includes("animal")
+      ? (identifySpecies
+        ? (event.AISpecies ? `物種候選：${event.AISpecies}` : "偵測到動物；物種無法辨識")
+        : "偵測到動物；未要求物種辨識")
+      : (event.AIEventLabels === "empty" ? "空觸發" : "非空觸發（人／車）");
+    job.message = `完成：${triage}`;
   } catch (error) {
-    event.AIStatus = "FAILED";
-    event.AIError = error.message.slice(0, 4000);
-    event.AIProcessedAt = new Date().toISOString();
-    job.status = "FAILED";
-    job.error = event.AIError;
-    job.message = "AI 推論失敗；人工答案未被修改。";
+    if (job.cancelRequested) {
+      job.status = "CANCELLED";
+      job.message = "工作已取消；辨識結果未寫入。";
+    } else {
+      event.AIStatus = "FAILED";
+      event.AIError = error.message.slice(0, 4000);
+      event.AIProcessedAt = new Date().toISOString();
+      job.status = "FAILED";
+      job.error = event.AIError;
+      job.message = "AI 推論失敗；人工答案未被修改。";
+    }
   } finally {
     job.finishedAt = new Date().toISOString();
     event.SchemaVersion = "2.1";
@@ -946,24 +1151,144 @@ async function runAiJob(job, event) {
   }
 }
 
-async function createAiJob(event) {
+async function createAiJob(event, options = {}) {
   const active = [...aiJobs.values()].find((job) => job.eventId === event.EventID && ["AI_PENDING", "AI_RUNNING"].includes(job.status));
   if (active) return { job: active, created: false };
+  const mode = normalizeAiMode(options.mode, "full");
+  const identifySpecies = normalizeIdentifySpecies(options.identifySpecies, false);
   const job = {
     jobId: `AI-${event.EventID}-${Date.now()}`.replace(/[^A-Za-z0-9_.-]/g, "-"),
     eventId: event.EventID,
     status: "AI_PENDING",
     createdAt: new Date().toISOString(),
-    message: "工作已排入本機推論佇列。",
+    mode,
+    identifySpecies,
+    message: identifySpecies
+      ? `${mode === "fast" ? "快速" : "完整"}辨識已排入佇列；有動物才會執行 SpeciesNet。`
+      : `${mode === "fast" ? "快速" : "完整"}空觸發初篩已排入佇列。`,
     log: "",
   };
   aiJobs.set(job.jobId, job);
   setImmediate(() => {
     aiRunQueue = aiRunQueue
-      .then(() => runAiJob(job, event), () => runAiJob(job, event))
+      .then(async () => {
+        await waitForAiQueueResume();
+        return runAiJob(job, event);
+      }, async () => {
+        await waitForAiQueueResume();
+        return runAiJob(job, event);
+      })
       .catch((error) => console.error("AI job failed", error));
   });
   return { job, created: true };
+}
+
+function hasCurrentAiTriage(event) {
+  return event.AIStatus === "AI_COMPLETE" && String(event.AIModelVersion || "").includes(AI_TRIAGE_VERSION);
+}
+
+function isCompleteForAiPreference(event, identifySpecies = false, mode = "fast") {
+  if (!hasCurrentAiTriage(event)) return false;
+  if (mode === "full" && !String(event.AIModelVersion || "").includes("mode=full")) return false;
+  if (!identifySpecies) return true;
+  const labels = String(event.AIEventLabels || "").split(";");
+  return !labels.includes("animal") || String(event.AIModelVersion || "").includes("species=yes");
+}
+
+function aiBatchStatus(identifySpecies = aiBatchPreference.identifySpecies, mode = aiBatchPreference.mode) {
+  const workspace = webWorkspaceEvents();
+  const workspaceIds = new Set(workspace.map((event) => event.EventID));
+  const jobs = [...aiJobs.values()];
+  const activeJobs = jobs.filter((job) => workspaceIds.has(job.eventId) && ["AI_PENDING", "AI_RUNNING"].includes(job.status));
+  const runningJob = activeJobs.find((job) => job.status === "AI_RUNNING");
+  const complete = workspace.filter((event) => isCompleteForAiPreference(event, identifySpecies, mode)).length;
+  const failed = workspace.filter((event) => event.AIStatus === "FAILED").length;
+  const emptyTrigger = workspace.filter((event) => hasCurrentAiTriage(event) && event.AIEventLabels === "empty").length;
+  const needsSpecies = workspace.filter((event) => hasCurrentAiTriage(event) && String(event.AIEventLabels).split(";").includes("animal")).length;
+  return {
+    total: workspace.length,
+    complete,
+    failed,
+    emptyTrigger,
+    needsSpecies,
+    remaining: workspace.length - complete,
+    queued: activeJobs.filter((job) => job.status === "AI_PENDING").length,
+    running: activeJobs.filter((job) => job.status === "AI_RUNNING").length,
+    active: activeJobs.length > 0,
+    paused: aiQueuePaused,
+    currentEventId: runningJob?.eventId || "",
+    identifySpecies: Boolean(identifySpecies),
+    mode: normalizeAiMode(mode, "fast"),
+  };
+}
+
+async function createAiBatch(mode = "fast", identifySpecies = false) {
+  const normalizedMode = normalizeAiMode(mode, "fast");
+  const normalizedSpecies = normalizeIdentifySpecies(identifySpecies, false);
+  aiBatchPreference = { mode: normalizedMode, identifySpecies: normalizedSpecies };
+  const workspace = webWorkspaceEvents();
+  const candidates = workspace.filter((event) => !isCompleteForAiPreference(event, normalizedSpecies, normalizedMode));
+  let created = 0;
+  let alreadyQueued = 0;
+  for (const event of candidates) {
+    const result = await createAiJob(event, { mode: normalizedMode, identifySpecies: normalizedSpecies });
+    if (result.created) created += 1;
+    else alreadyQueued += 1;
+  }
+  return {
+    created,
+    alreadyQueued,
+    mode: normalizedMode,
+    identifySpecies: normalizedSpecies,
+    skippedCompleted: workspace.length - candidates.length,
+    status: aiBatchStatus(normalizedSpecies, normalizedMode),
+  };
+}
+
+function cancelWorkspaceAiJobs() {
+  const workspaceIds = new Set(webWorkspaceEvents().map((event) => event.EventID));
+  let cancelled = 0;
+  for (const job of aiJobs.values()) {
+    if (!workspaceIds.has(job.eventId) || !["AI_PENDING", "AI_RUNNING"].includes(job.status)) continue;
+    job.cancelRequested = true;
+    job.status = "CANCELLED";
+    job.finishedAt = new Date().toISOString();
+    job.message = "工作已由使用者取消。";
+    cancelled += 1;
+  }
+  setAiQueuePaused(false);
+  return cancelled;
+}
+
+async function resetAiWorkspace() {
+  const workspace = webWorkspaceEvents();
+  const cancelled = cancelWorkspaceAiJobs();
+  const aiDrivenReviewStatuses = new Set(["AI_PENDING", "AI_RUNNING", "AI_COMPLETE", "NEEDS_REVIEW", "CONFLICT", "FAILED"]);
+  for (const event of workspace) {
+    for (const field of AI_FIELDS) event[field] = "";
+    event.AIStatus = "AI_PENDING";
+    if (!event.HumanLabels && aiDrivenReviewStatuses.has(event.ReviewStatus)) event.ReviewStatus = "";
+  }
+  await persistEvents("web");
+  return { reset: workspace.length, cancelled, status: aiBatchStatus(aiBatchPreference.identifySpecies, aiBatchPreference.mode) };
+}
+
+async function clearWebWorkspace() {
+  const removed = webWorkspaceEvents().length;
+  const cancelled = cancelWorkspaceAiJobs();
+  events = events.filter((event) => !isWebWorkspaceEvent(event));
+  importSessions.clear();
+  mediaPaths.clear();
+  for (const event of events) registerEventMedia(event);
+  await rm(config.webUploads.mediaRoot, { recursive: true, force: true });
+  await rm(config.webUploads.sessionsRoot, { recursive: true, force: true });
+  await unlink(config.webUploads.eventsCsv).catch((error) => {
+    if (error?.code !== "ENOENT") throw error;
+  });
+  await mkdir(config.webUploads.mediaRoot, { recursive: true });
+  await mkdir(config.webUploads.sessionsRoot, { recursive: true });
+  await persistEvents("web");
+  return { removed, cancelled, status: aiBatchStatus(aiBatchPreference.identifySpecies, aiBatchPreference.mode) };
 }
 
 function statusSummary() {
@@ -997,7 +1322,14 @@ const server = http.createServer(async (request, response) => {
       response.writeHead(corsAllowed ? 204 : 403, { "Content-Length": "0" });
       response.end();
     } else if (request.method === "GET" && url.pathname === "/api/health") {
-      jsonResponse(response, 200, { ok: true, deploymentId: config.deploymentId, events: events.length });
+      jsonResponse(response, 200, {
+        ok: true,
+        deploymentId: config.deploymentId,
+        events: events.length,
+        registeredEvents: events.filter((event) => !isWebWorkspaceEvent(event)).length,
+        webEvents: webWorkspaceEvents().length,
+        storageMode: config.storageMode,
+      });
     } else if (request.method === "GET" && url.pathname === "/api/config") {
       const runtime = await probeAiRuntime();
       jsonResponse(response, 200, {
@@ -1006,11 +1338,15 @@ const server = http.createServer(async (request, response) => {
         sourceManifest: config.manifestCsv,
         workingCsv: config.workingCsv,
         auditLog: config.auditLog,
+        storageMode: config.storageMode,
+        storageNotice: config.storageNotice,
         mediaRoot: config.mediaRoot,
         photoFirstWorkflow: true,
         schemaVersion: "2.1",
         webUpload: {
           enabled: true,
+          storageMode: config.webUploads.storageMode,
+          storageNotice: config.webUploads.storageNotice,
           maxFilesPerImport: config.webUploads.maxFilesPerImport,
           maxFileBytes: config.webUploads.maxFileBytes,
           eventGapSeconds: config.webUploads.eventGapSeconds,
@@ -1018,12 +1354,18 @@ const server = http.createServer(async (request, response) => {
         },
         inferenceAvailable: runtime.ready,
         aiRuntime: runtime,
+        aiJobsRoot: config.ai.jobsRoot,
+        aiJobsStorageMode: config.ai.jobsStorageMode,
       });
     } else if (request.method === "GET" && url.pathname === "/api/ai/status") {
       jsonResponse(response, 200, {
         runtime: await probeAiRuntime(url.searchParams.get("refresh") === "1"),
         activeJobs: [...aiJobs.values()].filter((job) => ["AI_PENDING", "AI_RUNNING"].includes(job.status)).map(publicAiJob),
       });
+    } else if (request.method === "GET" && url.pathname === "/api/ai/batch") {
+      const identifySpecies = normalizeIdentifySpecies(url.searchParams.get("identifySpecies"), aiBatchPreference.identifySpecies);
+      const mode = normalizeAiMode(url.searchParams.get("mode"), aiBatchPreference.mode);
+      jsonResponse(response, 200, { ok: true, status: aiBatchStatus(identifySpecies, mode) });
     } else if (request.method === "GET" && url.pathname.startsWith("/api/ai/jobs/")) {
       const jobId = decodeURIComponent(url.pathname.slice("/api/ai/jobs/".length));
       const job = aiJobs.get(jobId);
@@ -1044,6 +1386,12 @@ const server = http.createServer(async (request, response) => {
       const session = await getImportSession(importId);
       if (!session) jsonResponse(response, 404, { ok: false, error: "找不到匯入工作。" });
       else jsonResponse(response, 200, { ok: true, import: publicImportSession(session) });
+    } else if (request.method === "DELETE" && /^\/api\/imports\/[^/]+$/.test(url.pathname)) {
+      const importId = decodeURIComponent(url.pathname.slice("/api/imports/".length));
+      const session = await getImportSession(importId);
+      if (!session) throw requestError(404, "找不到匯入工作。");
+      await cancelImportSession(session);
+      jsonResponse(response, 200, { ok: true, cancelled: importId });
     } else if (request.method === "POST" && /^\/api\/imports\/[^/]+\/files\/\d+$/.test(url.pathname)) {
       const match = /^\/api\/imports\/([^/]+)\/files\/(\d+)$/.exec(url.pathname);
       const importId = decodeURIComponent(match[1]);
@@ -1082,8 +1430,37 @@ const server = http.createServer(async (request, response) => {
         jsonResponse(response, 400, { ok: false, error: "EventID 不存在。" });
         return;
       }
-      const { job, created } = await createAiJob(event);
+      const { job, created } = await createAiJob(event, {
+        mode: normalizeAiMode(body.mode, "full"),
+        identifySpecies: normalizeIdentifySpecies(body.identifySpecies, false),
+      });
       jsonResponse(response, created ? 202 : 200, { ok: true, created, job: publicAiJob(job) });
+    } else if (request.method === "POST" && url.pathname === "/api/ai/batch") {
+      const runtime = await probeAiRuntime(true);
+      if (!runtime.ready) {
+        jsonResponse(response, 503, { ok: false, error: runtime.message, runtime });
+        return;
+      }
+      const body = await readRequestBody(request);
+      const batch = await createAiBatch(
+        normalizeAiMode(body.mode, "fast"),
+        normalizeIdentifySpecies(body.identifySpecies, false),
+      );
+      jsonResponse(response, batch.created ? 202 : 200, { ok: true, ...batch });
+    } else if (request.method === "POST" && url.pathname === "/api/ai/batch/pause") {
+      const body = await readRequestBody(request);
+      setAiQueuePaused(Boolean(body.paused));
+      jsonResponse(response, 200, { ok: true, status: aiBatchStatus(aiBatchPreference.identifySpecies, aiBatchPreference.mode) });
+    } else if (request.method === "POST" && url.pathname === "/api/ai/reset") {
+      const body = await readRequestBody(request);
+      if (body.confirm !== "RESET_AI_WORKSPACE") throw requestError(400, "缺少 AI 重置確認。");
+      const result = await resetAiWorkspace();
+      jsonResponse(response, 200, { ok: true, ...result });
+    } else if (request.method === "POST" && url.pathname === "/api/workspace/clear") {
+      const body = await readRequestBody(request);
+      if (body.confirm !== "CLEAR_UPLOAD_WORKSPACE") throw requestError(400, "缺少清除工作區確認。");
+      const result = await clearWebWorkspace();
+      jsonResponse(response, 200, { ok: true, ...result });
     } else if (request.method === "POST" && url.pathname === "/api/annotations") {
       const body = await readRequestBody(request);
       const errors = validatePatch(body);

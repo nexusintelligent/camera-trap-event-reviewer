@@ -63,6 +63,10 @@ const state = {
   aiJobId: null,
   aiJobEventId: null,
   aiPollTimer: null,
+  aiBatchActive: false,
+  aiBatchStatus: null,
+  aiBatchPollTimer: null,
+  currentView: "upload",
   status: { total: 0, reviewed: 0, unreviewed: 0 },
 };
 
@@ -98,6 +102,56 @@ const toast = $("#toast");
 
 function currentEvent() {
   return state.events.find((event) => event.EventID === state.currentId);
+}
+
+function selectedAiMode() {
+  return document.querySelector('input[name="ai-mode"]:checked')?.value === "full" ? "full" : "fast";
+}
+
+function shouldIdentifySpecies() {
+  return Boolean($("#identify-species-toggle")?.checked);
+}
+
+function aiBatchUrl() {
+  return serviceUrl(`/api/ai/batch?identifySpecies=${shouldIdentifySpecies() ? "1" : "0"}&mode=${selectedAiMode()}`);
+}
+
+function isReviewEvent(event) {
+  return Boolean(event) && event.SourceType !== "web_upload";
+}
+
+function reviewEvents() {
+  return state.events.filter(isReviewEvent);
+}
+
+function showView(view, updateHash = true) {
+  const nextView = view === "review" ? "review" : "upload";
+  if (nextView !== state.currentView && nextView === "upload" && state.dirty) {
+    if (!window.confirm("目前人工覆核尚未儲存。要放棄修改並前往上傳頁嗎？")) return;
+    if (currentEvent()) setFormValues(currentEvent());
+    setDirty(false);
+  }
+  state.currentView = nextView;
+  if (nextView === "review" && !isReviewEvent(currentEvent())) {
+    state.currentId = reviewEvents()[0]?.EventID || null;
+    if (state.currentId) renderCurrentEvent();
+  }
+  $("#upload-view").hidden = nextView !== "upload";
+  $("#review-view").hidden = nextView !== "review";
+  $("#upload-tab").classList.toggle("active", nextView === "upload");
+  $("#review-tab").classList.toggle("active", nextView === "review");
+  $("#upload-tab").setAttribute("aria-selected", String(nextView === "upload"));
+  $("#review-tab").setAttribute("aria-selected", String(nextView === "review"));
+  for (const element of document.querySelectorAll(".review-only")) element.hidden = nextView !== "review";
+  if (updateHash) history.replaceState(null, "", nextView === "review" ? "#review" : "#upload");
+}
+
+function aiTriageLabel(event) {
+  if (event.AIStatus !== "AI_COMPLETE") return "尚未辨識";
+  const labels = new Set(String(event.AIEventLabels || "").split(";").filter(Boolean));
+  if (labels.has("animal")) return "需要辨識物種";
+  if (labels.has("person") || labels.has("vehicle")) return "非空觸發（人／車）";
+  return "空觸發";
 }
 
 function optionSelect(element, options) {
@@ -194,8 +248,9 @@ function isReviewed(event) {
 }
 
 function recalculateStatus() {
-  const reviewed = state.events.filter(isReviewed).length;
-  state.status = { total: state.events.length, reviewed, unreviewed: state.events.length - reviewed };
+  const collection = reviewEvents();
+  const reviewed = collection.filter(isReviewed).length;
+  state.status = { total: collection.length, reviewed, unreviewed: collection.length - reviewed };
 }
 
 function renderStatus() {
@@ -204,17 +259,22 @@ function renderStatus() {
   $("#progress-bar").style.width = total ? `${(reviewed / total) * 100}%` : "0%";
   $("#progress-meta").textContent = `尚未覆核 ${unreviewed} 組 · 完成 ${reviewed} 組`;
   $("#summary-total").textContent = total || 0;
-  $("#summary-ai-complete").textContent = state.events.filter((event) => event.AIStatus === "AI_COMPLETE").length;
-  $("#summary-needs-review").textContent = state.events.filter((event) => ["NEEDS_REVIEW", "CONFLICT", "UNCERTAIN"].includes(event.ReviewStatus)).length;
-  const species = new Set(state.events.flatMap((event) => String(event.AISpecies || event.CommonName || "")
+  const reviewCollection = reviewEvents();
+  $("#summary-ai-complete").textContent = reviewCollection.filter((event) => event.AIStatus === "AI_COMPLETE").length;
+  $("#summary-needs-review").textContent = reviewCollection.filter((event) => ["NEEDS_REVIEW", "CONFLICT", "UNCERTAIN"].includes(event.ReviewStatus)).length;
+  const species = new Set(reviewCollection.flatMap((event) => String(event.AISpecies || event.CommonName || "")
     .split(";").map((value) => value.trim()).filter(Boolean)));
   $("#summary-species").textContent = species.size;
+  $("#review-tab-count").textContent = total || 0;
+  $("#upload-ai-complete").textContent = state.aiBatchStatus?.complete ?? 0;
+  $("#upload-empty").textContent = state.aiBatchStatus?.emptyTrigger ?? 0;
+  $("#upload-needs-species").textContent = state.aiBatchStatus?.needsSpecies ?? 0;
 }
 
 function applyFilter() {
   const query = $("#search-input").value.trim().toLocaleLowerCase();
   const filter = $("#filter-select").value;
-  state.filtered = state.events.filter((event) => {
+  state.filtered = reviewEvents().filter((event) => {
     const challenge = event.ChallengeReasons || "";
     const matchesFilter =
       filter === "all"
@@ -381,12 +441,12 @@ function renderHumanLabelOptions() {
 function renderAiResult(event) {
   const aiStatus = event.AIStatus || "AI_PENDING";
   const runtime = state.config?.aiRuntime;
-  const anyJobRunning = Boolean(state.aiJobId);
+  const anyJobRunning = Boolean(state.aiJobId) || state.aiBatchActive;
   const running = ["AI_PENDING", "AI_RUNNING"].includes(aiStatus)
     && anyJobRunning && state.aiJobEventId === event.EventID;
   $("#ai-status").textContent = aiStatus;
   $("#ai-status").dataset.status = aiStatus;
-  $("#ai-labels").textContent = event.AIEventLabels || "尚未辨識";
+  $("#ai-labels").textContent = aiTriageLabel(event);
   $("#ai-species").textContent = event.AISpecies || "—";
   $("#ai-confidence").textContent = event.AIConfidence || "—";
   $("#ai-model").textContent = [event.AIModelName, event.AIModelVersion].filter(Boolean).join(" · ") || "尚未接線";
@@ -403,6 +463,8 @@ function renderAiResult(event) {
   if (!runtime?.ready) notice.textContent = runtime?.message || "請先安裝 MegaDetector／SpeciesNet。";
   else if (aiStatus === "FAILED") notice.textContent = `上次辨識失敗：${event.AIError || "請查看工作紀錄"}`;
   else if (running) notice.textContent = "本機正在執行 MegaDetector 與 SpeciesNet；可繼續查看其他事件。";
+  else if (state.aiBatchActive && state.aiBatchStatus?.paused) notice.textContent = "批次佇列已暫停；目前事件若仍在運算，完成後不會啟動下一組。";
+  else if (state.aiBatchActive) notice.textContent = `批次辨識執行中：${state.aiBatchStatus?.currentEventId || "正在準備下一組"}。可繼續瀏覽與人工標註。`;
   else if (anyJobRunning) notice.textContent = `事件 ${state.aiJobEventId} 正在辨識；完成後才能啟動下一個事件。`;
   else if (aiStatus === "AI_COMPLETE") notice.textContent = "AI 原始結果已保存；請由人工判讀決定最終答案。";
   else notice.textContent = "尚未辨識。第一次執行會下載官方模型權重，可能需要數分鐘。";
@@ -421,9 +483,219 @@ async function refreshAiFields(eventId) {
       renderMetadata(local);
     }
   }
-  state.status = payload.status;
+  recalculateStatus();
   renderStatus();
   renderEventList();
+}
+
+async function refreshAllAiFields() {
+  const response = await fetch(serviceUrl("/api/events"));
+  if (!response.ok) throw new Error("無法更新批次 AI 結果。");
+  const payload = await response.json();
+  const remoteById = new Map(payload.events.map((event) => [event.EventID, event]));
+  for (const local of state.events) {
+    const remote = remoteById.get(local.EventID);
+    if (!remote) continue;
+    for (const field of AI_RESULT_FIELDS) local[field] = remote[field] || "";
+  }
+  recalculateStatus();
+  renderStatus();
+  renderEventList();
+  if (currentEvent()) {
+    renderAiResult(currentEvent());
+    renderMetadata(currentEvent());
+  }
+}
+
+function renderAiBatch(status = state.aiBatchStatus) {
+  const button = $("#start-ai-batch-button");
+  const summary = $("#ai-batch-summary");
+  const progress = $("#ai-batch-progress");
+  if (!button || !summary || !progress) return;
+
+  const uploadedTotal = state.events.filter((event) => !isReviewEvent(event)).length;
+  const total = Number(status?.total ?? uploadedTotal);
+  const complete = Number(status?.complete || 0);
+  const queued = Number(status?.queued || 0);
+  const running = Number(status?.running || 0);
+  const failed = Number(status?.failed || 0);
+  const remaining = Number(status?.remaining ?? Math.max(0, total - complete));
+  const active = Boolean(status?.active);
+  const paused = Boolean(status?.paused);
+  const pauseButton = $("#pause-ai-batch-button");
+  const resetButton = $("#reset-ai-workspace-button");
+  const clearButton = $("#clear-upload-workspace-button");
+  const pill = $("#batch-state-pill");
+  const current = $("#ai-batch-current");
+  state.aiBatchActive = active;
+  progress.max = Math.max(1, total);
+  progress.value = Math.min(total, complete);
+  $("#upload-total").textContent = total;
+  $("#upload-ai-complete").textContent = complete;
+  $("#upload-empty").textContent = Number(status?.emptyTrigger || 0);
+  $("#upload-needs-species").textContent = Number(status?.needsSpecies || 0);
+  summary.textContent = `已完成 ${complete} / ${total} · 執行中 ${running} · 等待 ${queued} · 失敗 ${failed}`;
+  button.disabled = !state.config?.aiRuntime?.ready || active || remaining === 0;
+  button.textContent = active && paused
+    ? `批次已暫停 ${complete} / ${total}`
+    : active
+    ? `批次辨識中 ${complete} / ${total}`
+    : (remaining > 0 ? `一鍵辨識其餘 ${remaining} 組` : "全部 AI 辨識完成");
+  pauseButton.disabled = !active;
+  resetButton.disabled = total === 0;
+  clearButton.disabled = total === 0;
+  pauseButton.textContent = paused ? "繼續批次辨識" : "完成目前這組後暫停";
+  pill.textContent = paused ? "已暫停" : (active ? "辨識中" : (remaining ? "等待啟動" : "全部完成"));
+  pill.dataset.status = paused ? "PAUSED" : (active ? "AI_RUNNING" : (remaining ? "AI_PENDING" : "AI_COMPLETE"));
+  current.textContent = paused
+    ? "佇列已暫停；按「繼續批次辨識」接續。"
+    : (status?.currentEventId ? `目前處理：${status.currentEventId}` : (active ? "正在準備下一組…" : "尚未啟動批次工作"));
+  for (const input of document.querySelectorAll('input[name="ai-mode"]')) input.disabled = active;
+  $("#identify-species-toggle").disabled = active;
+  $("#ai-goal-note").textContent = shouldIdentifySpecies()
+    ? "動物事件會自動接續 SpeciesNet；空觸發、人與車輛不會增加物種辨識時間。"
+    : "目前只判斷空觸發、動物、人與車輛，不執行物種辨識。";
+}
+
+async function pollAiBatch() {
+  clearTimeout(state.aiBatchPollTimer);
+  try {
+    const response = await fetch(aiBatchUrl());
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "無法讀取批次辨識進度。");
+    const previousFinished = Number(state.aiBatchStatus?.complete || 0) + Number(state.aiBatchStatus?.failed || 0);
+    state.aiBatchStatus = payload.status;
+    renderAiBatch(payload.status);
+    const finished = Number(payload.status.complete || 0) + Number(payload.status.failed || 0);
+    if (finished !== previousFinished || !payload.status.active) await refreshAllAiFields();
+    if (payload.status.active) {
+      state.aiBatchPollTimer = setTimeout(pollAiBatch, 3000);
+      return;
+    }
+    showToast(payload.status.failed
+      ? `批次辨識結束；完成 ${payload.status.complete} 組，失敗 ${payload.status.failed} 組，可再次按鈕重試。`
+      : `批次辨識完成：${payload.status.complete} 組。`, Boolean(payload.status.failed));
+  } catch (error) {
+    state.aiBatchStatus = { ...(state.aiBatchStatus || {}), active: false };
+    renderAiBatch(state.aiBatchStatus);
+    showToast(error.message, true);
+  }
+}
+
+async function startAiBatch() {
+  if (state.aiBatchActive) return;
+  if (state.dirty) {
+    showToast("請先儲存目前的人工標註，再啟動全部 AI 辨識。", true);
+    return;
+  }
+  const button = $("#start-ai-batch-button");
+  button.disabled = true;
+  const mode = selectedAiMode();
+  const identifySpecies = shouldIdentifySpecies();
+  localStorage.setItem("cameraTrapAiMode", mode);
+  localStorage.setItem("cameraTrapIdentifySpecies", String(identifySpecies));
+  try {
+    const response = await fetch(serviceUrl("/api/ai/batch"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode, identifySpecies }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "無法建立批次 AI 工作。");
+    state.aiBatchStatus = payload.status;
+    renderAiBatch(payload.status);
+    if (currentEvent()) renderAiResult(currentEvent());
+    showToast(`已排入 ${payload.created} 組；已完成的 ${payload.skippedCompleted} 組不會重跑。`);
+    if (payload.status.active) pollAiBatch();
+  } catch (error) {
+    showToast(error.message, true);
+    renderAiBatch(state.aiBatchStatus);
+  }
+}
+
+async function toggleAiBatchPause() {
+  if (!state.aiBatchStatus?.active) return;
+  const paused = !state.aiBatchStatus.paused;
+  const button = $("#pause-ai-batch-button");
+  button.disabled = true;
+  try {
+    const response = await fetch(serviceUrl("/api/ai/batch/pause"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paused }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "無法變更批次辨識狀態。");
+    state.aiBatchStatus = payload.status;
+    renderAiBatch(payload.status);
+    if (currentEvent()) renderAiResult(currentEvent());
+    showToast(paused ? "會在目前事件完成後暫停。" : "已繼續批次辨識。");
+    pollAiBatch();
+  } catch (error) {
+    showToast(error.message, true);
+    renderAiBatch(state.aiBatchStatus);
+  }
+}
+
+async function refreshAiBatchStatus() {
+  const response = await fetch(aiBatchUrl());
+  const payload = await responseJson(response, "無法重新載入 AI 工作區狀態。");
+  state.aiBatchStatus = payload.status;
+  state.aiBatchActive = Boolean(payload.status?.active);
+  renderAiBatch(payload.status);
+  return payload.status;
+}
+
+async function resetAiWorkspace() {
+  const total = Number(state.aiBatchStatus?.total || 0);
+  if (!total) return;
+  const activeNote = state.aiBatchStatus?.active ? "目前執行中的工作也會取消，完成後不會寫入結果。\n\n" : "";
+  if (!window.confirm(`${activeNote}要重置 ${total} 組上傳事件的 AI 結果嗎？\n照片與事件不會刪除，原本 154 組人工覆核資料也不受影響。`)) return;
+  const button = $("#reset-ai-workspace-button");
+  button.disabled = true;
+  try {
+    const response = await fetch(serviceUrl("/api/ai/reset"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: "RESET_AI_WORKSPACE" }),
+    });
+    const payload = await responseJson(response, "無法重置 AI 工作區。");
+    clearTimeout(state.aiBatchPollTimer);
+    state.aiBatchStatus = payload.status;
+    state.aiBatchActive = false;
+    await reloadEventCollection();
+    renderAiBatch(payload.status);
+    showToast(`已重置 ${payload.reset} 組上傳事件的 AI 結果。`);
+  } catch (error) {
+    showToast(error.message, true);
+    renderAiBatch(state.aiBatchStatus);
+  }
+}
+
+async function clearUploadWorkspace() {
+  const total = Number(state.aiBatchStatus?.total || 0);
+  if (!total) return;
+  if (!window.confirm(`要清除 AI 工作區中的 ${total} 組上傳事件與工作副本嗎？\n\n此操作無法復原，但原始來源資料夾及 154 組人工覆核資料不會被修改。`)) return;
+  const button = $("#clear-upload-workspace-button");
+  button.disabled = true;
+  try {
+    const response = await fetch(serviceUrl("/api/workspace/clear"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: "CLEAR_UPLOAD_WORKSPACE" }),
+    });
+    const payload = await responseJson(response, "無法清除上傳工作區。");
+    clearTimeout(state.aiBatchPollTimer);
+    state.aiBatchStatus = payload.status;
+    state.aiBatchActive = false;
+    sessionStorage.removeItem("cameraTrapLastImport");
+    await reloadEventCollection();
+    renderAiBatch(payload.status);
+    showToast(`已清除 ${payload.removed} 組上傳事件；現在可上傳新的資料夾。`);
+  } catch (error) {
+    showToast(error.message, true);
+    renderAiBatch(state.aiBatchStatus);
+  }
 }
 
 async function pollAiJob(jobId, eventId) {
@@ -457,7 +729,7 @@ async function pollAiJob(jobId, eventId) {
 
 async function startAiInference() {
   const event = currentEvent();
-  if (!event || state.aiJobId) return;
+  if (!event || state.aiJobId || state.aiBatchActive) return;
   if (state.dirty) {
     showToast("請先儲存目前的人工標註，再啟動 AI 辨識。", true);
     return;
@@ -468,7 +740,7 @@ async function startAiInference() {
     const response = await fetch(serviceUrl("/api/ai/jobs"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ EventID: event.EventID }),
+      body: JSON.stringify({ EventID: event.EventID, mode: selectedAiMode(), identifySpecies: shouldIdentifySpecies() }),
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "無法建立 AI 工作。");
@@ -726,6 +998,40 @@ function clearImportPreviews() {
   $("#import-preview").replaceChildren();
 }
 
+function resetImportSelection() {
+  clearImportPreviews();
+  state.importFiles = [];
+  state.importJob = null;
+  $("#photo-picker").value = "";
+  $("#folder-picker").value = "";
+  $("#import-summary").textContent = "尚未選擇檔案";
+  $("#hash-progress").hidden = true;
+  $("#hash-progress").value = 0;
+  $("#prepare-job-button").disabled = true;
+  $("#prepare-job-button").textContent = "上傳並建立事件";
+  $("#clear-import-button").disabled = true;
+  $("#job-result").hidden = true;
+}
+
+async function clearImportSelection() {
+  if (state.uploading) {
+    showToast("正在傳送檔案，請等待目前檔案完成後再清除。", true);
+    return;
+  }
+  if (!state.importFiles.length && !state.importJob) return;
+  if (!window.confirm("要清除目前已選取的檔案與未完成上傳嗎？\n電腦中的原始檔不會被刪除。")) return;
+  try {
+    if (state.importJob?.importId && state.importJob.status !== "COMPLETE") {
+      const response = await fetch(serviceUrl(`/api/imports/${encodeURIComponent(state.importJob.importId)}`), { method: "DELETE" });
+      await responseJson(response, "無法取消未完成的上傳工作。");
+    }
+    resetImportSelection();
+    showToast("已清除目前選取；可以重新選擇其他資料夾。");
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
 function renderImportPreview() {
   clearImportPreviews();
   const preview = $("#import-preview");
@@ -765,6 +1071,11 @@ function renderImportPreview() {
 }
 
 async function handleImportFiles(fileList) {
+  if (state.uploading) return;
+  if (state.importJob && state.importFiles.some((item) => item.uploaded)) {
+    showToast("目前有未完成上傳；請先按「清除已選檔案」或繼續完成上傳。", true);
+    return;
+  }
   const candidates = [...fileList]
     .filter((file) => ACCEPTED_MEDIA_EXTENSIONS.has(fileExtension(file.name)))
     .filter((file, index, all) => {
@@ -778,6 +1089,7 @@ async function handleImportFiles(fileList) {
   $("#prepare-job-button").textContent = "上傳並建立事件";
   if (!candidates.length) {
     $("#import-summary").textContent = "沒有可接受的照片或影片。";
+    $("#clear-import-button").disabled = true;
     clearImportPreviews();
     return;
   }
@@ -803,6 +1115,7 @@ async function handleImportFiles(fileList) {
   }
   $("#import-summary").textContent = `已檢查 ${state.importFiles.length} 個檔案 · ${folders.size} 個來源 · ${formatBytes(totalBytes)} · 預估約 ${Math.ceil(state.importFiles.length / 4)} 個事件`;
   $("#prepare-job-button").disabled = false;
+  $("#clear-import-button").disabled = false;
   renderImportPreview();
 }
 
@@ -816,7 +1129,7 @@ async function reloadEventCollection(preferredId = "") {
   const response = await fetch(serviceUrl("/api/events"));
   const payload = await responseJson(response, "無法重新載入事件成果。");
   state.events = payload.events.map(normalizeEvent);
-  state.status = payload.status;
+  recalculateStatus();
   state.currentId = state.events.some((event) => event.EventID === preferredId)
     ? preferredId
     : (state.currentId && state.events.some((event) => event.EventID === state.currentId) ? state.currentId : state.events[0]?.EventID || null);
@@ -832,6 +1145,7 @@ async function uploadImportJob() {
   const progress = $("#hash-progress");
   const result = $("#job-result");
   button.disabled = true;
+  $("#clear-import-button").disabled = true;
   result.hidden = false;
   progress.hidden = false;
   progress.max = state.importFiles.length + 1;
@@ -882,6 +1196,7 @@ async function uploadImportJob() {
     state.importJob = completed;
     sessionStorage.setItem("cameraTrapLastImport", JSON.stringify(completed));
     await reloadEventCollection(completed.eventIds[0] || "");
+    await refreshAiBatchStatus();
     $("#filter-select").value = "all";
     $("#search-input").value = "";
     applyFilter();
@@ -898,6 +1213,8 @@ async function uploadImportJob() {
     showToast(`已建立 ${completed.eventIds.length} 個可辨識事件`);
     clearImportPreviews();
     state.importFiles = [];
+    state.importJob = null;
+    $("#clear-import-button").disabled = true;
     $("#photo-picker").value = "";
     $("#folder-picker").value = "";
   } catch (error) {
@@ -909,6 +1226,7 @@ async function uploadImportJob() {
     state.uploading = false;
     progress.hidden = state.importFiles.length === 0;
     button.textContent = state.importFiles.length ? "繼續上傳並建立事件" : "上傳並建立事件";
+    $("#clear-import-button").disabled = state.importFiles.length === 0;
   }
 }
 
@@ -953,6 +1271,10 @@ function initializeControls() {
     if (event.target === $("#image-dialog")) $("#image-dialog").close();
   });
   $("#open-import-button").addEventListener("click", () => $("#import-dialog").showModal());
+  $("#open-import-home-button").addEventListener("click", () => $("#import-dialog").showModal());
+  $("#open-import-card-button").addEventListener("click", () => $("#import-dialog").showModal());
+  $("#upload-tab").addEventListener("click", () => showView("upload"));
+  $("#review-tab").addEventListener("click", () => showView("review"));
   $("#close-import-dialog").addEventListener("click", () => $("#import-dialog").close());
   $("#choose-photos-button").addEventListener("click", (event) => {
     event.stopPropagation();
@@ -986,8 +1308,30 @@ function initializeControls() {
     });
   }
   $("#drop-zone").addEventListener("drop", (event) => handleImportFiles(event.dataTransfer.files));
+  $("#clear-import-button").addEventListener("click", clearImportSelection);
   $("#prepare-job-button").addEventListener("click", uploadImportJob);
   $("#start-ai-button").addEventListener("click", startAiInference);
+  $("#start-ai-batch-button").addEventListener("click", startAiBatch);
+  $("#pause-ai-batch-button").addEventListener("click", toggleAiBatchPause);
+  $("#reset-ai-workspace-button").addEventListener("click", resetAiWorkspace);
+  $("#clear-upload-workspace-button").addEventListener("click", clearUploadWorkspace);
+  const savedAiMode = localStorage.getItem("cameraTrapAiMode");
+  const savedModeInput = document.querySelector(`input[name="ai-mode"][value="${savedAiMode === "full" ? "full" : "fast"}"]`);
+  if (savedModeInput) savedModeInput.checked = true;
+  $("#identify-species-toggle").checked = localStorage.getItem("cameraTrapIdentifySpecies") === "true";
+  for (const input of document.querySelectorAll('input[name="ai-mode"]')) {
+    input.addEventListener("change", async () => {
+      localStorage.setItem("cameraTrapAiMode", selectedAiMode());
+      if (!state.aiBatchActive && state.serverAvailable) await refreshAiBatchStatus().catch((error) => showToast(error.message, true));
+    });
+  }
+  $("#identify-species-toggle").addEventListener("change", async () => {
+    localStorage.setItem("cameraTrapIdentifySpecies", String(shouldIdentifySpecies()));
+    renderAiBatch(state.aiBatchStatus);
+    if (!state.aiBatchActive && state.serverAvailable) await refreshAiBatchStatus().catch((error) => showToast(error.message, true));
+  });
+  showView(window.location.hash === "#review" ? "review" : "upload", false);
+  window.addEventListener("hashchange", () => showView(window.location.hash === "#review" ? "review" : "upload", false));
 
   window.addEventListener("beforeunload", (event) => {
     if (state.dirty) event.preventDefault();
@@ -1009,16 +1353,20 @@ async function start() {
   initializePwa();
   $("#export-link").href = serviceUrl("/api/export.csv");
   try {
-    const [configResponse, eventsResponse, taxonomyResponse] = await Promise.all([
+    const [configResponse, eventsResponse, taxonomyResponse, batchResponse] = await Promise.all([
       fetch(serviceUrl("/api/config")),
       fetch(serviceUrl("/api/events")),
       fetch(serviceUrl("/api/taxonomy")),
+      fetch(aiBatchUrl()),
     ]);
-    if (!configResponse.ok || !eventsResponse.ok || !taxonomyResponse.ok) throw new Error("無法讀取專案資料。");
+    if (!configResponse.ok || !eventsResponse.ok || !taxonomyResponse.ok || !batchResponse.ok) throw new Error("無法讀取專案資料。");
     state.config = await configResponse.json();
     const eventPayload = await eventsResponse.json();
+    const batchPayload = await batchResponse.json();
     state.events = eventPayload.events.map(normalizeEvent);
-    state.status = eventPayload.status;
+    recalculateStatus();
+    state.aiBatchStatus = batchPayload.status;
+    state.aiBatchActive = Boolean(batchPayload.status?.active);
     state.taxonomy = (await taxonomyResponse.json()).taxonomy;
     state.serverAvailable = true;
     renderConnectionState();
@@ -1030,6 +1378,8 @@ async function start() {
       state.currentId = state.events[0].EventID;
       renderCurrentEvent();
     }
+    renderAiBatch(state.aiBatchStatus);
+    if (state.aiBatchActive) pollAiBatch();
   } catch (error) {
     state.serverAvailable = false;
     renderConnectionState();
