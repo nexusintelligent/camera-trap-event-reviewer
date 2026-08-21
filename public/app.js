@@ -329,24 +329,25 @@ function renderStatus() {
   $("#upload-needs-species").textContent = state.aiBatchStatus?.needsSpecies ?? 0;
 }
 
+function eventContentLabels(event) {
+  return new Set(String(event.HumanLabels || event.FinalDecision || event.VisibleClass || event.AIEventLabels || "")
+    .split(";").map((label) => label.trim()).filter(Boolean));
+}
+
 function applyFilter() {
   const query = $("#search-input").value.trim().toLocaleLowerCase();
-  const filter = $("#filter-select").value;
+  const reviewFilter = $("#filter-select").value;
+  const contentFilter = $("#content-filter-select").value;
   state.filtered = reviewEvents().filter((event) => {
-    const challenge = event.ChallengeReasons || "";
-    const matchesFilter =
-      filter === "all"
-      || (filter === "unreviewed" && !isReviewed(event))
-      || (filter === "reviewed" && isReviewed(event))
-      || (filter === "ai_complete" && event.AIStatus === "AI_COMPLETE")
-      || (filter === "ai_pending" && ["AI_PENDING", "AI_RUNNING"].includes(event.AIStatus))
-      || (filter === "needs_review" && event.ReviewStatus === "NEEDS_REVIEW")
-      || (filter === "conflict" && event.ReviewStatus === "CONFLICT")
-      || (filter === "audit" && event.AuditRandom === "yes")
-      || (filter === "challenge" && event.SamplingStratum === "challenge")
-      || (filter === "night" && challenge.includes("night"))
-      || (filter === "filename_hint" && (event.filenameHint || challenge.includes("filename_hint")));
-    if (!matchesFilter) return false;
+    const labels = eventContentLabels(event);
+    const matchesReview = reviewFilter === "all"
+      || (reviewFilter === "unreviewed" && !isReviewed(event))
+      || (reviewFilter === "reviewed" && isReviewed(event));
+    const matchesContent = contentFilter === "all"
+      || (contentFilter === "empty" && labels.has("empty"))
+      || (contentFilter === "animal" && labels.has("animal"))
+      || (contentFilter === "person_vehicle" && (labels.has("person") || labels.has("vehicle")));
+    if (!matchesReview || !matchesContent) return false;
     if (!query) return true;
     return [event.EventID, event.Photo1, event.Photo2, event.Photo3, event.Video, event.filenameHint, event.CommonName, event.TaxonCode]
       .join(" ").toLocaleLowerCase().includes(query);
@@ -1458,6 +1459,7 @@ async function uploadImportJob() {
     await reloadEventCollection(completed.eventIds[0] || "");
     await refreshAiBatchStatus();
     $("#filter-select").value = "all";
+    $("#content-filter-select").value = "all";
     $("#search-input").value = "";
     applyFilter();
     $("#import-summary").textContent = `完成：${completed.mediaCount} 個媒體已建立 ${completed.eventIds.length} 個事件，原始檔未被修改。`;
@@ -1526,6 +1528,7 @@ function initializeControls() {
   $("#save-next-button").addEventListener("click", () => saveCurrent(true));
   $("#search-input").addEventListener("input", applyFilter);
   $("#filter-select").addEventListener("change", applyFilter);
+  $("#content-filter-select").addEventListener("change", applyFilter);
   $("#review-collection-select").addEventListener("change", (event) => {
     const previous = state.reviewCollectionId;
     if (state.dirty && !window.confirm("目前事件尚未儲存。要放棄修改並切換覆核資料批次嗎？")) {
@@ -1535,6 +1538,7 @@ function initializeControls() {
     state.reviewCollectionId = event.target.value || "registered";
     state.currentId = null;
     $("#filter-select").value = "all";
+    $("#content-filter-select").value = "all";
     $("#search-input").value = "";
     setDirty(false);
     recalculateStatus();

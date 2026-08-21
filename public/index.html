@@ -161,22 +161,24 @@
           <span aria-hidden="true">⌕</span>
           <input id="search-input" type="search" placeholder="事件編號、檔名、提示…">
         </label>
-        <div class="filter-row">
-          <select id="filter-select" aria-label="篩選事件">
-            <option value="all">全部事件</option>
-            <option value="unreviewed">尚未覆核</option>
-            <option value="reviewed">已覆核</option>
-            <option value="ai_complete">AI 已辨識</option>
-            <option value="ai_pending">AI 待處理</option>
-            <option value="needs_review">需要人工覆核</option>
-            <option value="conflict">AI／人工衝突</option>
-            <option value="audit">隨機稽核</option>
-            <option value="challenge">挑戰樣本</option>
-            <option value="night">夜間樣本</option>
-            <option value="filename_hint">有檔名提示</option>
-          </select>
-          <span id="filter-count">0</span>
+        <div class="review-filter-grid">
+          <label>覆核狀態
+            <select id="filter-select" aria-label="依覆核狀態篩選事件">
+              <option value="all">全部事件</option>
+              <option value="reviewed">已覆核</option>
+              <option value="unreviewed">尚未覆核</option>
+            </select>
+          </label>
+          <label>事件內容
+            <select id="content-filter-select" aria-label="依事件內容篩選事件">
+              <option value="all">全部內容</option>
+              <option value="empty">空觸發</option>
+              <option value="animal">有動物</option>
+              <option value="person_vehicle">人／車</option>
+            </select>
+          </label>
         </div>
+        <div class="filter-result-count">符合條件 <strong id="filter-count">0</strong> 組</div>
       </section>
 
       <nav class="event-list" id="event-list" aria-label="事件清單"></nav>
