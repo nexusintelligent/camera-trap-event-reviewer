@@ -32,6 +32,7 @@ assert.match(pageHtml, /id="review-view"/);
 assert.match(pageHtml, /id="import-deployment-name"/);
 assert.match(pageHtml, /id="upload-result-list"/);
 assert.match(pageHtml, /id="upload-results-batch-select"/);
+assert.match(pageHtml, /id="species-result-summary"/);
 assert.match(pageHtml, /id="ai-result-dialog"/);
 assert.match(pageHtml, /id="review-collection-select"/);
 assert.match(pageHtml, /class="filter-heading">篩選條件<\/div>/);
@@ -157,6 +158,7 @@ assert.equal(aiBatchSpecies.response.status, 200);
 assert.equal(aiBatchSpecies.body.status.total, health.body.webEvents);
 assert.equal(aiBatchSpecies.body.status.identifySpecies, true);
 assert.equal(aiBatchSpecies.body.status.mode, "full");
+assert.equal(typeof aiBatchSpecies.body.status.speciesPending, "number");
 checks.push("ai:independent-species-option");
 
 const rejectedReset = await json("/api/ai/reset", {

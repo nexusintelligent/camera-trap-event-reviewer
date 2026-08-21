@@ -1,6 +1,6 @@
 import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, copyFile, link, mkdir, open, readFile, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, link, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import http from "node:http";
 import path from "node:path";
@@ -146,7 +146,7 @@ const IMMUTABLE_FIELDS = [
   "Photo1", "Photo2", "Photo3", "Video",
 ];
 const AI_FIELDS = [
-  "AIStatus", "AIEventLabels", "AISpecies", "AIConfidence", "AIModelName",
+  "AIStatus", "AIEventLabels", "AISpecies", "AISpeciesConfidence", "AIConfidence", "AIModelName",
   "AIModelVersion", "AIProcessedAt", "AIError",
 ];
 const EDITABLE_FIELDS = [
@@ -207,6 +207,30 @@ let aiQueuePaused = false;
 let aiResumeWaiters = [];
 let aiBatchPreference = { mode: "fast", identifySpecies: false };
 const importSessions = new Map();
+const SPECIES_RESULT_VERSION = "species-result-v2.1";
+const CHINESE_TAXON_NAMES = new Map(Object.entries({
+  "animal": "未知動物（待人工確認）",
+  "mammal": "哺乳類",
+  "bird": "鳥類",
+  "carnivorous mammal": "食肉目",
+  "rodent": "齧齒目",
+  "civet genet family": "靈貓科",
+  "masked palm civet": "白鼻心",
+  "ferret badger species": "鼬獾屬",
+  "weasel family": "鼬科",
+  "procyonidae family": "浣熊科",
+  "possum family": "負鼠科",
+  "old world porcupine family": "豪豬科",
+  "crab-eating mongoose": "食蟹獴",
+  "peromyscus species": "白足鼠屬",
+  "greater hog badger": "豬獾",
+  "muntjac species": "麂屬",
+  "rabbit and hare family": "兔科",
+  "phasianidae family": "雉科",
+  "bat": "蝙蝠類",
+  "nutria": "海狸鼠",
+  "north american river otter": "北美水獺",
+}).map(([name, translation]) => [normalizedTaxonText(name), translation]));
 
 function isWebWorkspaceEvent(event) {
   return event?._source === "web" || event?.SourceType === "web_upload";
@@ -904,18 +928,24 @@ function detectionLabel(detection, categories) {
   return "";
 }
 
-function classificationEntry(entry, categories) {
+function classificationEntry(entry, categories, descriptions = {}) {
+  let id = "";
+  let score = 0;
   if (Array.isArray(entry)) {
-    return { label: categories?.[String(entry[0])] || String(entry[0] || ""), score: Number(entry[1] || 0) };
+    id = String(entry[0] || "");
+    score = Number(entry[1] || 0);
+  } else if (entry && typeof entry === "object") {
+    id = String(entry.category || entry.class || entry.class_id || entry.id || entry.label || "");
+    score = Number(entry.conf ?? entry.score ?? entry.confidence ?? 0);
+  } else {
+    id = String(entry || "");
   }
-  if (entry && typeof entry === "object") {
-    const id = entry.category || entry.class || entry.class_id || entry.id || entry.label || "";
-    return {
-      label: categories?.[String(id)] || String(entry.label || id),
-      score: Number(entry.conf ?? entry.score ?? entry.confidence ?? 0),
-    };
-  }
-  return { label: String(entry || ""), score: 0 };
+  return {
+    id,
+    label: categories?.[id] || String(entry?.label || id),
+    description: descriptions?.[id] || "",
+    score,
+  };
 }
 
 function normalizedTaxonText(value) {
@@ -926,17 +956,32 @@ function normalizedTaxonText(value) {
     .trim();
 }
 
-function localizedTaxonName(label) {
-  const parts = String(label || "").split(";").map((part) => part.trim()).filter(Boolean);
-  const leaf = normalizedTaxonText(parts.at(-1));
-  if (["", "blank", "empty", "background", "person", "human", "vehicle", "animal"].includes(leaf)) return "";
-  const normalizedParts = new Set(parts.map(normalizedTaxonText).filter(Boolean));
+function classificationSemanticLabel(entry) {
+  const leaf = normalizedTaxonText(entry.description?.split(";").at(-1) || entry.label);
+  if (["", "blank", "empty", "background"].includes(leaf)) return "empty";
+  if (["person", "human"].includes(leaf)) return "person";
+  if (leaf === "vehicle") return "vehicle";
+  return "animal";
+}
+
+function localizedTaxonName(label, description = "") {
+  const descriptionParts = String(description || "").split(";").map((part) => part.trim());
+  const labelParts = String(label || "").split(";").map((part) => part.trim());
+  const parts = descriptionParts.some(Boolean) ? descriptionParts : labelParts;
+  const leaf = normalizedTaxonText(parts.at(-1) || label);
+  if (["", "blank", "empty", "background", "person", "human", "vehicle"].includes(leaf)) return "";
+  const genusSpecies = normalizedTaxonText([parts[4], parts[5]].filter(Boolean).join(" "));
+  const normalizedParts = new Set([
+    ...parts.map(normalizedTaxonText),
+    genusSpecies,
+    normalizedTaxonText(label),
+  ].filter(Boolean));
   const match = taxonomy.find((taxon) => {
     const scientific = normalizedTaxonText(taxon.scientificName);
     const code = normalizedTaxonText(taxon.taxonCode);
     return (scientific && normalizedParts.has(scientific)) || (code && normalizedParts.has(code));
   });
-  return match?.commonName || "未知動物（待人工確認）";
+  return CHINESE_TAXON_NAMES.get(leaf) || match?.commonName || `未知動物（${parts.at(-1) || label}，待人工確認）`;
 }
 
 function collectDetections(result) {
@@ -959,21 +1004,43 @@ function collectDetections(result) {
 function summarizeAiResult(result, presenceThreshold = 0.15) {
   const detectionCategories = result.detection_categories || { "1": "animal", "2": "person", "3": "vehicle" };
   const classificationCategories = result.classification_categories || {};
+  const classificationDescriptions = result.classification_category_descriptions || {};
   const labels = new Set();
   const species = new Set();
   let confidence = 0;
+  let speciesConfidence = 0;
+  let animalDetections = 0;
+  let classifiedAnimalDetections = 0;
+  let blankAnimalDetections = 0;
   for (const detection of collectDetections(result)) {
     const detectionConfidence = Number(detection.conf ?? detection.score ?? 0);
     confidence = Math.max(confidence, detectionConfidence);
     if (detectionConfidence < presenceThreshold) continue;
     const label = detectionLabel(detection, detectionCategories);
-    if (label) labels.add(label);
-    if (label === "animal" && Array.isArray(detection.classifications) && detection.classifications.length) {
-      const top = classificationEntry(detection.classifications[0], classificationCategories);
-      const name = localizedTaxonName(top.label);
-      if (name) species.add(name);
-      confidence = Math.max(confidence, top.score);
+    if (label !== "animal") {
+      if (label) labels.add(label);
+      continue;
     }
+    animalDetections += 1;
+    if (!Array.isArray(detection.classifications) || !detection.classifications.length) {
+      labels.add("animal");
+      continue;
+    }
+    classifiedAnimalDetections += 1;
+    const top = classificationEntry(detection.classifications[0], classificationCategories, classificationDescriptions);
+    const semanticLabel = classificationSemanticLabel(top);
+    if (semanticLabel === "empty") {
+      blankAnimalDetections += 1;
+      continue;
+    }
+    if (semanticLabel === "person" || semanticLabel === "vehicle") {
+      labels.add(semanticLabel);
+      continue;
+    }
+    labels.add("animal");
+    const name = localizedTaxonName(top.label, top.description);
+    if (name) species.add(name);
+    speciesConfidence = Math.max(speciesConfidence, top.score);
   }
   if (!labels.size) labels.add("empty");
   const failures = [];
@@ -984,9 +1051,73 @@ function summarizeAiResult(result, presenceThreshold = 0.15) {
   return {
     labels: [...labels].sort(),
     species: [...species].slice(0, 12),
+    speciesConfidence: speciesConfidence ? speciesConfidence.toFixed(4) : "",
     confidence: confidence ? confidence.toFixed(4) : "0.0000",
     failures: [...new Set(failures)],
+    reclassifiedFromAnimal: animalDetections > 0
+      && classifiedAnimalDetections === animalDetections
+      && blankAnimalDetections === animalDetections,
   };
+}
+
+function applyAiSummaryToEvent(event, summary, { identifySpecies = false, mode = "fast" } = {}) {
+  event.AIStatus = "AI_COMPLETE";
+  event.AIEventLabels = summary.labels.length ? summary.labels.join(";") : "empty";
+  event.AISpecies = identifySpecies ? summary.species.join(";") : "";
+  event.AISpeciesConfidence = identifySpecies ? summary.speciesConfidence : "";
+  event.AIConfidence = summary.confidence;
+  event.AIModelName = identifySpecies ? "MegaDetector + SpeciesNet" : "MegaDetector 空觸發初篩";
+  event.AIModelVersion = [
+    `MegaDetector ${config.ai.megadetectorVersion} (${config.ai.detectorModel})`,
+    identifySpecies ? `SpeciesNet ${config.ai.speciesnetVersion}` : "SpeciesNet skipped",
+    `mode=${mode}`,
+    `species=${identifySpecies ? "yes" : "no"}`,
+    identifySpecies ? SPECIES_RESULT_VERSION : "",
+    AI_TRIAGE_VERSION,
+  ].filter(Boolean).join("; ");
+  event.AIProcessedAt = new Date().toISOString();
+  event.AIError = summary.failures.join("; ");
+  if (event.HumanLabels && normalizedLabelSet(event.HumanLabels) !== normalizedLabelSet(event.AIEventLabels)) {
+    event.ReviewStatus = "CONFLICT";
+  } else if (event.HumanLabels && event.ReviewStatus === "CONFLICT") {
+    event.ReviewStatus = "HUMAN_CONFIRMED";
+  } else if (!event.HumanLabels && !event.ReviewStatus) {
+    event.ReviewStatus = "NEEDS_REVIEW";
+  }
+  event.SchemaVersion = "2.1";
+}
+
+async function reclassifyCachedSpeciesResults(candidates, mode = "fast") {
+  let directories = [];
+  try {
+    directories = (await readdir(config.ai.jobsRoot, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort((left, right) => right.localeCompare(left));
+  } catch {
+    return 0;
+  }
+  let updated = 0;
+  for (const event of candidates) {
+    const modelVersion = String(event.AIModelVersion || "");
+    if (!modelVersion.includes("species=yes") || !modelVersion.includes(`mode=${mode}`)) continue;
+    const prefix = `AI-${event.EventID}-`;
+    const matchingDirectories = directories.filter((name) => name.startsWith(prefix));
+    for (const directory of matchingDirectories) {
+      try {
+        const resultPath = path.join(config.ai.jobsRoot, directory, "result.json");
+        const rawResult = JSON.parse(await readFile(resultPath, "utf8"));
+        const summary = summarizeAiResult(rawResult, config.ai.detectionThresholdForClassification);
+        applyAiSummaryToEvent(event, summary, { identifySpecies: true, mode });
+        updated += 1;
+        break;
+      } catch {
+        // Try the next older cached result; a partial job may not contain valid JSON.
+      }
+    }
+  }
+  if (updated) await persistEvents("web");
+  return updated;
 }
 
 function normalizeAiMode(value, fallback = "full") {
@@ -1103,33 +1234,15 @@ async function runAiJob(job, event) {
     if (processResult.code !== 0) throw new Error(processResult.stderr.slice(-2000) || `AI 程序結束碼 ${processResult.code}`);
     const rawResult = JSON.parse(await readFile(resultFile, "utf8"));
     const summary = summarizeAiResult(rawResult, config.ai.detectionThresholdForClassification);
-    event.AIStatus = "AI_COMPLETE";
-    event.AIEventLabels = summary.labels.length ? summary.labels.join(";") : "empty";
-    event.AISpecies = identifySpecies ? summary.species.join(";") : "";
-    event.AIConfidence = summary.confidence;
-    event.AIModelName = identifySpecies ? "MegaDetector + SpeciesNet" : "MegaDetector 空觸發初篩";
-    event.AIModelVersion = [
-      `MegaDetector ${config.ai.megadetectorVersion} (${config.ai.detectorModel})`,
-      identifySpecies ? `SpeciesNet ${config.ai.speciesnetVersion}` : "SpeciesNet skipped",
-      `mode=${job.mode}`,
-      `species=${identifySpecies ? "yes" : "no"}`,
-      AI_TRIAGE_VERSION,
-    ].join("; ");
-    event.AIProcessedAt = new Date().toISOString();
-    event.AIError = summary.failures.join("; ");
-    if (event.HumanLabels && normalizedLabelSet(event.HumanLabels) !== normalizedLabelSet(event.AIEventLabels)) {
-      event.ReviewStatus = "CONFLICT";
-    } else if (event.HumanLabels && event.ReviewStatus === "CONFLICT") {
-      event.ReviewStatus = "HUMAN_CONFIRMED";
-    } else if (!event.HumanLabels && !event.ReviewStatus) {
-      event.ReviewStatus = "NEEDS_REVIEW";
-    }
+    applyAiSummaryToEvent(event, summary, { identifySpecies, mode: job.mode });
     job.status = "AI_COMPLETE";
     const triage = event.AIEventLabels.includes("animal")
       ? (identifySpecies
         ? (event.AISpecies ? `物種候選：${event.AISpecies}` : "偵測到動物；物種無法辨識")
         : "偵測到動物；未要求物種辨識")
-      : (event.AIEventLabels === "empty" ? "空觸發" : "非空觸發（人／車）");
+      : (event.AIEventLabels === "empty"
+        ? (summary.reclassifiedFromAnimal ? "SpeciesNet 未確認動物，改列空觸發" : "空觸發")
+        : "非空觸發（人／車）");
     job.message = `完成：${triage}`;
   } catch (error) {
     if (job.cancelRequested) {
@@ -1192,7 +1305,11 @@ function isCompleteForAiPreference(event, identifySpecies = false, mode = "fast"
   if (mode === "full" && !String(event.AIModelVersion || "").includes("mode=full")) return false;
   if (!identifySpecies) return true;
   const labels = String(event.AIEventLabels || "").split(";");
-  return !labels.includes("animal") || String(event.AIModelVersion || "").includes("species=yes");
+  if (!labels.includes("animal")) return true;
+  const modelVersion = String(event.AIModelVersion || "");
+  return modelVersion.includes("species=yes")
+    && modelVersion.includes(SPECIES_RESULT_VERSION)
+    && Boolean(String(event.AISpecies || "").trim());
 }
 
 function aiBatchStatus(identifySpecies = aiBatchPreference.identifySpecies, mode = aiBatchPreference.mode) {
@@ -1205,12 +1322,17 @@ function aiBatchStatus(identifySpecies = aiBatchPreference.identifySpecies, mode
   const failed = workspace.filter((event) => event.AIStatus === "FAILED").length;
   const emptyTrigger = workspace.filter((event) => hasCurrentAiTriage(event) && event.AIEventLabels === "empty").length;
   const needsSpecies = workspace.filter((event) => hasCurrentAiTriage(event) && String(event.AIEventLabels).split(";").includes("animal")).length;
+  const speciesPending = workspace.filter((event) => {
+    const labels = String(event.AIEventLabels || "").split(";");
+    return labels.includes("animal") && !isCompleteForAiPreference(event, true, mode);
+  }).length;
   return {
     total: workspace.length,
     complete,
     failed,
     emptyTrigger,
     needsSpecies,
+    speciesPending,
     remaining: workspace.length - complete,
     queued: activeJobs.filter((job) => job.status === "AI_PENDING").length,
     running: activeJobs.filter((job) => job.status === "AI_RUNNING").length,
@@ -1227,7 +1349,11 @@ async function createAiBatch(mode = "fast", identifySpecies = false) {
   const normalizedSpecies = normalizeIdentifySpecies(identifySpecies, false);
   aiBatchPreference = { mode: normalizedMode, identifySpecies: normalizedSpecies };
   const workspace = webWorkspaceEvents();
-  const candidates = workspace.filter((event) => !isCompleteForAiPreference(event, normalizedSpecies, normalizedMode));
+  let candidates = workspace.filter((event) => !isCompleteForAiPreference(event, normalizedSpecies, normalizedMode));
+  const reclassified = normalizedSpecies
+    ? await reclassifyCachedSpeciesResults(candidates, normalizedMode)
+    : 0;
+  candidates = workspace.filter((event) => !isCompleteForAiPreference(event, normalizedSpecies, normalizedMode));
   let created = 0;
   let alreadyQueued = 0;
   for (const event of candidates) {
@@ -1240,6 +1366,7 @@ async function createAiBatch(mode = "fast", identifySpecies = false) {
     alreadyQueued,
     mode: normalizedMode,
     identifySpecies: normalizedSpecies,
+    reclassified,
     skippedCompleted: workspace.length - candidates.length,
     status: aiBatchStatus(normalizedSpecies, normalizedMode),
   };

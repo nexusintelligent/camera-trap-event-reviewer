@@ -614,6 +614,7 @@ function renderAiBatch(status = state.aiBatchStatus) {
   const running = Number(status?.running || 0);
   const failed = Number(status?.failed || 0);
   const remaining = Number(status?.remaining ?? Math.max(0, total - complete));
+  const speciesPending = Number(status?.speciesPending || 0);
   const active = Boolean(status?.active);
   const paused = Boolean(status?.paused);
   const pauseButton = $("#pause-ai-batch-button");
@@ -634,7 +635,11 @@ function renderAiBatch(status = state.aiBatchStatus) {
     ? `批次已暫停 ${complete} / ${total}`
     : active
     ? `批次辨識中 ${complete} / ${total}`
-    : (remaining > 0 ? `一鍵辨識其餘 ${remaining} 組` : "全部 AI 辨識完成");
+    : (remaining > 0
+      ? (shouldIdentifySpecies() && speciesPending === remaining
+        ? `追加物種辨識 ${remaining} 組`
+        : `一鍵辨識其餘 ${remaining} 組`)
+      : "全部 AI 辨識完成");
   pauseButton.disabled = !active;
   resetButton.disabled = total === 0;
   clearButton.disabled = total === 0;
@@ -647,7 +652,7 @@ function renderAiBatch(status = state.aiBatchStatus) {
   for (const input of document.querySelectorAll('input[name="ai-mode"]')) input.disabled = active;
   $("#identify-species-toggle").disabled = active;
   $("#ai-goal-note").textContent = shouldIdentifySpecies()
-    ? "動物事件會自動接續 SpeciesNet；空觸發、人與車輛不會增加物種辨識時間。"
+    ? "動物事件會自動接續 SpeciesNet；若物種模型判定為 blank，會改列空觸發並保留人工覆核。"
     : "目前只判斷空觸發、動物、人與車輛，不執行物種辨識。";
   renderUploadResults();
 }
@@ -666,7 +671,7 @@ function aiResultLabel(event) {
   if (category === "pending") return event.AIStatus === "AI_RUNNING" ? "辨識中" : "尚未辨識";
   if (category === "empty") return "空觸發";
   if (category === "other_nonempty") return "非空觸發（人／車輛）";
-  return event.AISpecies ? `動物 · ${event.AISpecies}` : "需要辨識物種";
+  return event.AISpecies ? `動物 · ${event.AISpecies}` : "動物 · 物種待追加辨識";
 }
 
 function renderUploadResults() {
@@ -695,6 +700,25 @@ function renderUploadResults() {
   $("#upload-results-meta").textContent = batch.length
     ? `此匯入批次共 ${batch.length} 組 · AI 已完成 ${completed} 組 · 空觸發 ${counts.empty} 組 · 動物事件 ${counts.needs_species} 組`
     : "尚未匯入事件。完成上傳後，辨識結果會依批次顯示在這裡。";
+
+  const speciesSummary = $("#species-result-summary");
+  const speciesCounts = new Map();
+  for (const event of batch.filter((item) => aiResultCategory(item) === "needs_species")) {
+    const candidates = String(event.AISpecies || "").split(";").map((name) => name.trim()).filter(Boolean);
+    for (const candidate of candidates) speciesCounts.set(candidate, (speciesCounts.get(candidate) || 0) + 1);
+  }
+  speciesSummary.replaceChildren();
+  speciesSummary.hidden = speciesCounts.size === 0;
+  if (speciesCounts.size) {
+    const title = document.createElement("strong");
+    title.textContent = "本批次物種候選";
+    speciesSummary.append(title);
+    for (const [name, count] of [...speciesCounts.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0], "zh-Hant"))) {
+      const chip = document.createElement("span");
+      chip.textContent = `${name} ${count}`;
+      speciesSummary.append(chip);
+    }
+  }
 
   const filtered = batch.filter((event) => state.uploadResultFilter === "all" || aiResultCategory(event) === state.uploadResultFilter);
   list.replaceChildren();
@@ -731,7 +755,7 @@ function renderUploadResults() {
     result.className = `compact-result-status category-${aiResultCategory(event)}`;
     result.textContent = aiResultLabel(event);
     const meta = document.createElement("small");
-    meta.textContent = `${event.EventTime || "無拍攝時間"}${event.AIConfidence ? ` · 信心 ${event.AIConfidence}` : ""}`;
+    meta.textContent = `${event.EventTime || "無拍攝時間"}${event.AIConfidence ? ` · 偵測 ${event.AIConfidence}` : ""}${event.AISpeciesConfidence ? ` · 物種 ${event.AISpeciesConfidence}` : ""}`;
     copy.append(title, result, meta);
 
     const detail = document.createElement("span");
@@ -755,6 +779,7 @@ function openAiResultDetail(event) {
     ["事件結果", aiResultLabel(event)],
     ["AI 狀態", event.AIStatus || "AI_PENDING"],
     ["物種中文候選", event.AISpecies || "—"],
+    ["物種信心", event.AISpeciesConfidence || "—"],
     ["信心", event.AIConfidence || "—"],
   ]) {
     const item = document.createElement("div");
@@ -862,7 +887,8 @@ async function startAiBatch() {
     state.aiBatchStatus = payload.status;
     renderAiBatch(payload.status);
     if (currentEvent()) renderAiResult(currentEvent());
-    showToast(`已排入 ${payload.created} 組；已完成的 ${payload.skippedCompleted} 組不會重跑。`);
+    const cachedNote = payload.reclassified ? `已直接整理 ${payload.reclassified} 組既有 SpeciesNet 結果；` : "";
+    showToast(`${cachedNote}另排入 ${payload.created} 組；已完成的 ${payload.skippedCompleted} 組不會重跑。`);
     if (payload.status.active) pollAiBatch();
   } catch (error) {
     showToast(error.message, true);

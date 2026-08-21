@@ -13,7 +13,7 @@
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="./icons/icon-180.png">
-  <link rel="stylesheet" href="./styles.css?v=2.6.3">
+  <link rel="stylesheet" href="./styles.css?v=2.7.0">
 </head>
 <body>
   <header class="topbar">
@@ -135,11 +135,12 @@
       <div class="upload-result-tabs" id="upload-result-tabs" aria-label="篩選當次辨識結果">
         <button class="active" type="button" data-result-filter="all">全部 <span id="result-count-all">0</span></button>
         <button type="button" data-result-filter="empty">空觸發 <span id="result-count-empty">0</span></button>
-        <button type="button" data-result-filter="needs_species">需要辨識物種 <span id="result-count-species">0</span></button>
+        <button type="button" data-result-filter="needs_species">動物／物種結果 <span id="result-count-species">0</span></button>
         <button type="button" data-result-filter="other_nonempty">人／車輛 <span id="result-count-other">0</span></button>
         <button type="button" data-result-filter="pending">尚未完成 <span id="result-count-pending">0</span></button>
       </div>
       <div class="upload-results-meta" id="upload-results-meta">尚未匯入事件。</div>
+      <div class="species-result-summary" id="species-result-summary" hidden></div>
       <div class="compact-result-list" id="upload-result-list"></div>
       <button class="button ghost results-more-button" id="upload-results-more" type="button" hidden>顯示更多結果</button>
     </section>
@@ -455,6 +456,6 @@
   </dialog>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="./app.js?v=2.6.3"></script>
+  <script type="module" src="./app.js?v=2.7.0"></script>
 </body>
 </html>
