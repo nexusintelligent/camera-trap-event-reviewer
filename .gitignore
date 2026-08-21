@@ -7,6 +7,8 @@ node_modules/
 ai_jobs/
 local-data/
 dist/
+__pycache__/
+*.py[cod]
 *.pt
 *.pth
 .env

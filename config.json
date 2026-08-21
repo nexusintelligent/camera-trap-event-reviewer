@@ -26,6 +26,7 @@
     "speciesnetVersion": "5.0.5",
     "detectionThresholdForClassification": 0.15,
     "detectionThresholdForOutput": 0.01,
-    "timeSampleSeconds": 1
+    "timeSampleSeconds": 1,
+    "workerBatchSize": 0
   }
 }

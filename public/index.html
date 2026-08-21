@@ -13,7 +13,7 @@
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="./icons/icon-180.png">
-  <link rel="stylesheet" href="./styles.css?v=2.7.1">
+  <link rel="stylesheet" href="./styles.css?v=2.8.0">
 </head>
 <body>
   <header class="topbar">
@@ -87,7 +87,7 @@
           <legend>成果需求</legend>
           <label>
             <input id="identify-species-toggle" type="checkbox">
-            <span><strong>需要辨識物種</strong><small>先判斷是否空觸發；只有偵測到動物時才接續 SpeciesNet，結果以中文候選名稱顯示。</small></span>
+            <span><strong>需要辨識物種</strong><small>僅完整模式可使用；快速模式固定完全跳過 SpeciesNet。</small></span>
           </label>
           <p id="ai-goal-note">目前只判斷空觸發、動物、人與車輛，不執行物種辨識。</p>
         </fieldset>
@@ -96,7 +96,7 @@
           <legend>辨識速度</legend>
           <label>
             <input type="radio" name="ai-mode" value="fast" checked>
-            <span><strong>快速初篩</strong><small>只分析第 1、3 張照片，不讀影片；建議用於整批處理。</small></span>
+            <span><strong>快速初篩</strong><small>常駐 MegaDetector 整批處理第 1、3 張；不載入 SpeciesNet、不讀影片。</small></span>
           </label>
           <label>
             <input type="radio" name="ai-mode" value="full">
@@ -118,6 +118,18 @@
           <progress id="ai-batch-progress" value="0" max="1">0%</progress>
           <small id="ai-batch-current">尚未啟動批次工作</small>
         </div>
+        <details class="ai-performance-panel" id="ai-performance-panel">
+          <summary>快速模式效能診斷</summary>
+          <div class="performance-grid">
+            <div><span>照片／事件</span><strong id="perf-photos">—</strong></div>
+            <div><span>模型載入</span><strong id="perf-model-loads">—</strong></div>
+            <div><span>裝置</span><strong id="perf-device">—</strong></div>
+            <div><span>偵測快取</span><strong id="perf-cache">—</strong></div>
+            <div><span>總處理時間</span><strong id="perf-total">—</strong></div>
+            <div><span>每張平均</span><strong id="perf-average">—</strong></div>
+          </div>
+          <p id="perf-stages">完成快速初篩後顯示各階段耗時。</p>
+        </details>
       </article>
     </section>
 
@@ -456,6 +468,6 @@
   </dialog>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="./app.js?v=2.7.1"></script>
+  <script type="module" src="./app.js?v=2.8.0"></script>
 </body>
 </html>

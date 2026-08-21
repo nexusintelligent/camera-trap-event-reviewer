@@ -43,7 +43,11 @@ SpeciesNet 模型權重快取於 `%LOCALAPPDATA%\CameraTrapReviewer\model-cache`
 - 偵測分類門檻 `0.15`，結果輸出門檻 `0.01`。
 - 影片每 `1` 秒取樣一次。
 
-流程為：MegaDetector 先辨識 `animal`、`person`、`vehicle` 與位置框；動物位置框再交給 SpeciesNet 做物種分類；最後彙整成事件級 AI 標籤。若 AI 與既有人工標籤不一致，事件標為 `CONFLICT`，但不會覆寫人工答案。
+快速模式使用單一常駐 Python Worker，在整批工作中只載入一次 MegaDetector，集中送入每個事件的第 1、3 張照片，並依硬體選擇批次大小。快速模式不匯入 SpeciesNet、不開啟影片，也不抽取影片影格；偵測門檻仍維持上述設定。後端以媒體清單內既有 SHA-256 快取偵測結果與縮圖，缺少清單雜湊時才使用路徑、大小與修改時間建立快取鍵，不重新計算原始檔 SHA-256。
+
+完整模式流程為：MegaDetector 先辨識 `animal`、`person`、`vehicle` 與位置框；動物位置框再交給 SpeciesNet 做物種分類；最後彙整成事件級 AI 標籤。若 AI 與既有人工標籤不一致，事件標為 `CONFLICT`，但不會覆寫人工答案。兩種模式都不會修改原始照片。
+
+最近一次快速模式的模型載入次數、照片數、CPU／GPU、CUDA、各階段耗時、平均每張時間及快取命中數，可在「上傳與 AI 初篩」頁面的「本次效能診斷」查看，或讀取 `/api/ai/performance`。
 
 AI 狀態使用 `AI_PENDING`、`AI_RUNNING`、`AI_COMPLETE` 與 `FAILED`。人工複核狀態使用 `NEEDS_REVIEW`、`HUMAN_CONFIRMED`、`UNCERTAIN`、`CONFLICT` 等值。
 

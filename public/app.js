@@ -97,6 +97,9 @@ function normalizeEvent(event) {
     media: Object.fromEntries(
       Object.entries(event.media || {}).map(([key, value]) => [key, value ? serviceUrl(value) : ""]),
     ),
+    thumbnails: Object.fromEntries(
+      Object.entries(event.thumbnails || {}).map(([key, value]) => [key, value ? serviceUrl(value) : ""]),
+    ),
   };
 }
 
@@ -115,7 +118,7 @@ function selectedAiMode() {
 }
 
 function shouldIdentifySpecies() {
-  return Boolean($("#identify-species-toggle")?.checked);
+  return selectedAiMode() === "full" && Boolean($("#identify-species-toggle")?.checked);
 }
 
 function aiBatchUrl() {
@@ -651,11 +654,59 @@ function renderAiBatch(status = state.aiBatchStatus) {
     ? "佇列已暫停；按「繼續批次辨識」接續。"
     : (status?.currentEventId ? `目前處理：${status.currentEventId}` : (active ? "正在準備下一組…" : "尚未啟動批次工作"));
   for (const input of document.querySelectorAll('input[name="ai-mode"]')) input.disabled = active;
-  $("#identify-species-toggle").disabled = active;
-  $("#ai-goal-note").textContent = shouldIdentifySpecies()
-    ? "動物事件會自動接續 SpeciesNet；若物種模型判定為 blank，會改列空觸發並保留人工覆核。"
-    : "目前只判斷空觸發、動物、人與車輛，不執行物種辨識。";
+  const fastMode = selectedAiMode() === "fast";
+  if (fastMode && $("#identify-species-toggle").checked) {
+    $("#identify-species-toggle").checked = false;
+    localStorage.setItem("cameraTrapIdentifySpecies", "false");
+  }
+  $("#identify-species-toggle").disabled = active || fastMode;
+  $("#ai-goal-note").textContent = fastMode
+    ? "快速模式固定使用常駐 MegaDetector，只讀第 1、3 張照片；不載入 SpeciesNet，也不開啟影片。"
+    : (shouldIdentifySpecies()
+      ? "動物事件會自動接續 SpeciesNet；若物種模型判定為 blank，會改列空觸發並保留人工覆核。"
+      : "完整模式目前只判斷空觸發、動物、人與車輛，不執行物種辨識。");
+  renderAiPerformance(status);
   renderUploadResults();
+}
+
+function formatPerformanceSeconds(value) {
+  const seconds = Number(value || 0);
+  if (!seconds) return "—";
+  if (seconds < 60) return `${seconds.toFixed(2)} 秒`;
+  return `${Math.floor(seconds / 60)} 分 ${(seconds % 60).toFixed(1)} 秒`;
+}
+
+function renderAiPerformance(status) {
+  const performanceReport = status?.performance;
+  const hardware = state.config?.aiRuntime?.hardware || {};
+  const worker = status?.worker || {};
+  const device = performanceReport?.device || worker.device || hardware.device || "—";
+  const cuda = performanceReport?.cudaAvailable ?? worker.cudaAvailable ?? hardware.cudaAvailable;
+  const gpuNames = performanceReport?.systemGpus || hardware.systemGpus || [];
+  $("#perf-device").textContent = `${device}${cuda ? " · CUDA 可用" : " · CUDA 不可用"}${gpuNames.length ? ` · ${gpuNames.join("、")}` : ""}`;
+  if (!performanceReport) {
+    $("#perf-photos").textContent = "尚無新版批次紀錄";
+    $("#perf-model-loads").textContent = worker.modelLoadCount ? `${worker.modelLoadCount} 次（Worker 累計）` : "尚未啟動 Worker";
+    $("#perf-total").textContent = "—";
+    $("#perf-average").textContent = "—";
+    $("#perf-cache").textContent = "—";
+    $("#perf-stages").textContent = "完成下一次快速初篩後，這裡會列出各階段耗時。";
+    return;
+  }
+  $("#perf-photos").textContent = `${performanceReport.requestedPhotos} 張（${performanceReport.events} 組）`;
+  $("#perf-model-loads").textContent = `${performanceReport.modelLoadCountThisBatch} 次（Worker 累計 ${performanceReport.workerModelLoadCount} 次）`;
+  $("#perf-total").textContent = formatPerformanceSeconds(performanceReport.timingsSeconds?.total);
+  $("#perf-average").textContent = `${Number(performanceReport.averageSecondsPerRequestedPhoto || 0).toFixed(3)} 秒／張`;
+  $("#perf-cache").textContent = `命中 ${performanceReport.detectionCacheHits}，實際推論 ${performanceReport.inferredPhotos}`;
+  const timings = performanceReport.timingsSeconds || {};
+  $("#perf-stages").textContent = [
+    `收集 ${formatPerformanceSeconds(timings.collect)}`,
+    `快取讀取 ${formatPerformanceSeconds(timings.cacheRead)}`,
+    `Worker／模型啟動 ${formatPerformanceSeconds(timings.workerStartup)}`,
+    `照片解碼 ${formatPerformanceSeconds(timings.decode)}`,
+    `推論 ${formatPerformanceSeconds(timings.inference)}`,
+    `寫入結果 ${formatPerformanceSeconds(Number(timings.cacheWrite || 0) + Number(timings.persist || 0))}`,
+  ].join(" · ");
 }
 
 function aiResultCategory(event) {
@@ -754,9 +805,9 @@ function renderUploadResults() {
 
     const preview = document.createElement("span");
     preview.className = "compact-result-preview";
-    if (event.media.Photo1) {
+    if (event.thumbnails?.Photo1 || event.media.Photo1) {
       const image = document.createElement("img");
-      image.src = event.media.Photo1;
+      image.src = event.thumbnails?.Photo1 || event.media.Photo1;
       image.alt = `${event.EventID} 第一張照片`;
       image.loading = "lazy";
       image.addEventListener("error", () => preview.classList.add("load-error"));
@@ -1693,6 +1744,7 @@ function initializeControls() {
   for (const input of document.querySelectorAll('input[name="ai-mode"]')) {
     input.addEventListener("change", async () => {
       localStorage.setItem("cameraTrapAiMode", selectedAiMode());
+      renderAiBatch(state.aiBatchStatus);
       if (!state.aiBatchActive && state.serverAvailable) await refreshAiBatchStatus().catch((error) => showToast(error.message, true));
     });
   }

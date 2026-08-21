@@ -26,6 +26,8 @@ assert.match(pageHtml, /id="pause-ai-batch-button"/);
 assert.match(pageHtml, /id="reset-ai-workspace-button"/);
 assert.match(pageHtml, /id="clear-upload-workspace-button"/);
 assert.match(pageHtml, /id="identify-species-toggle"/);
+assert.match(pageHtml, /id="ai-performance-panel"/);
+assert.match(pageHtml, /app\.js\?v=2\.8\.0/);
 assert.match(pageHtml, /id="clear-import-button"/);
 assert.match(pageHtml, /id="upload-view"/);
 assert.match(pageHtml, /id="review-view"/);
@@ -33,7 +35,7 @@ assert.match(pageHtml, /id="import-deployment-name"/);
 assert.match(pageHtml, /id="upload-result-list"/);
 assert.match(pageHtml, /id="upload-results-batch-select"/);
 assert.match(pageHtml, /id="species-result-summary"/);
-assert.match(pageHtml, /app\.js\?v=2\.7\.1/);
+assert.match(pageHtml, /app\.js\?v=2\.8\.0/);
 assert.match(pageHtml, /id="ai-result-dialog"/);
 assert.match(pageHtml, /id="review-collection-select"/);
 assert.match(pageHtml, /class="filter-heading">篩選條件<\/div>/);
@@ -145,6 +147,12 @@ assert.equal(typeof aiStatus.body.runtime?.ready, "boolean");
 assert.ok(["READY", "NOT_INSTALLED", "BROKEN"].includes(aiStatus.body.runtime?.status));
 checks.push("ai:runtime-status");
 
+const aiPerformance = await json("/api/ai/performance");
+assert.equal(aiPerformance.response.status, 200);
+assert.equal(typeof aiPerformance.body.runtime?.hardware?.cudaAvailable, "boolean");
+assert.equal(typeof aiPerformance.body.worker?.running, "boolean");
+checks.push("ai:worker-performance-diagnostics");
+
 const aiBatch = await json("/api/ai/batch?identifySpecies=0&mode=fast");
 assert.equal(aiBatch.response.status, 200);
 assert.equal(aiBatch.body.status.total, health.body.webEvents);
@@ -152,6 +160,7 @@ assert.equal(typeof aiBatch.body.status.active, "boolean");
 assert.equal(typeof aiBatch.body.status.paused, "boolean");
 assert.equal(aiBatch.body.status.identifySpecies, false);
 assert.equal(aiBatch.body.status.mode, "fast");
+assert.equal(typeof aiBatch.body.status.worker?.running, "boolean");
 checks.push("ai:batch-status");
 
 const aiBatchSpecies = await json("/api/ai/batch?identifySpecies=1&mode=full");
