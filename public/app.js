@@ -42,7 +42,7 @@ const EDITABLE_FIELDS = [
 ];
 
 const AI_RESULT_FIELDS = [
-  "AIStatus", "AIEventLabels", "AISpecies", "AIConfidence", "AIModelName",
+  "AIStatus", "AIEventLabels", "AISpecies", "AISpeciesConfidence", "AIConfidence", "AIModelName",
   "AIModelVersion", "AIProcessedAt", "AIError", "ReviewStatus",
 ];
 
@@ -70,6 +70,7 @@ const state = {
   reviewCollectionId: "registered",
   uploadBatchId: "",
   uploadResultFilter: "all",
+  uploadSpeciesFilter: "",
   uploadResultLimit: 24,
   status: { total: 0, reviewed: 0, unreviewed: 0 },
 };
@@ -707,25 +708,42 @@ function renderUploadResults() {
     const candidates = String(event.AISpecies || "").split(";").map((name) => name.trim()).filter(Boolean);
     for (const candidate of candidates) speciesCounts.set(candidate, (speciesCounts.get(candidate) || 0) + 1);
   }
+  if (state.uploadSpeciesFilter && !speciesCounts.has(state.uploadSpeciesFilter)) state.uploadSpeciesFilter = "";
   speciesSummary.replaceChildren();
   speciesSummary.hidden = speciesCounts.size === 0;
   if (speciesCounts.size) {
     const title = document.createElement("strong");
-    title.textContent = "本批次物種候選";
+    title.textContent = "本批次物種候選（點選篩選）";
     speciesSummary.append(title);
     for (const [name, count] of [...speciesCounts.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0], "zh-Hant"))) {
-      const chip = document.createElement("span");
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.dataset.speciesFilter = name;
+      chip.className = "species-filter-chip";
+      chip.classList.toggle("active", state.uploadSpeciesFilter === name);
+      chip.setAttribute("aria-pressed", String(state.uploadSpeciesFilter === name));
+      chip.setAttribute("aria-label", `只顯示物種候選為${name}的 ${count} 組事件`);
       chip.textContent = `${name} ${count}`;
       speciesSummary.append(chip);
     }
   }
 
-  const filtered = batch.filter((event) => state.uploadResultFilter === "all" || aiResultCategory(event) === state.uploadResultFilter);
+  const filtered = batch.filter((event) => {
+    const matchesCategory = state.uploadResultFilter === "all" || aiResultCategory(event) === state.uploadResultFilter;
+    const candidates = new Set(String(event.AISpecies || "").split(";").map((name) => name.trim()).filter(Boolean));
+    const matchesSpecies = !state.uploadSpeciesFilter || candidates.has(state.uploadSpeciesFilter);
+    return matchesCategory && matchesSpecies;
+  });
+  if (state.uploadSpeciesFilter) {
+    $("#upload-results-meta").textContent += ` · 正在篩選「${state.uploadSpeciesFilter}」${filtered.length} 組`;
+  }
   list.replaceChildren();
   if (!filtered.length) {
     const empty = document.createElement("div");
     empty.className = "compact-results-empty";
-    empty.textContent = batch.length ? "這個分類目前沒有事件。" : "尚無可顯示的辨識結果。";
+    empty.textContent = batch.length
+      ? (state.uploadSpeciesFilter ? `沒有符合「${state.uploadSpeciesFilter}」的事件。` : "這個分類目前沒有事件。")
+      : "尚無可顯示的辨識結果。";
     list.append(empty);
   }
   for (const event of filtered.slice(0, state.uploadResultLimit)) {
@@ -1589,6 +1607,7 @@ function initializeControls() {
   $("#upload-results-batch-select").addEventListener("change", (event) => {
     state.uploadBatchId = event.target.value;
     state.uploadResultFilter = "all";
+    state.uploadSpeciesFilter = "";
     state.uploadResultLimit = 24;
     renderUploadResults();
   });
@@ -1596,6 +1615,16 @@ function initializeControls() {
     const button = event.target.closest("[data-result-filter]");
     if (!button) return;
     state.uploadResultFilter = button.dataset.resultFilter;
+    state.uploadSpeciesFilter = "";
+    state.uploadResultLimit = 24;
+    renderUploadResults();
+  });
+  $("#species-result-summary").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-species-filter]");
+    if (!button) return;
+    const selectedSpecies = button.dataset.speciesFilter;
+    state.uploadSpeciesFilter = state.uploadSpeciesFilter === selectedSpecies ? "" : selectedSpecies;
+    state.uploadResultFilter = "needs_species";
     state.uploadResultLimit = 24;
     renderUploadResults();
   });

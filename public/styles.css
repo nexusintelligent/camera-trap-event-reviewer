@@ -165,7 +165,10 @@ body.connection-warning .sidebar { top: 137px; height: calc(100vh - 137px); }
 .species-result-summary { margin: 0 0 14px; padding: 10px 12px; display: flex; align-items: center; flex-wrap: wrap; gap: 7px; color: #244b38; background: #eef6f0; border: 1px solid #d2e5d7; border-radius: 9px; font-size: 12px; }
 .species-result-summary[hidden] { display: none; }
 .species-result-summary strong { margin-right: 3px; }
-.species-result-summary span { padding: 4px 7px; background: white; border: 1px solid #c9ddcf; border-radius: 999px; }
+.species-filter-chip { padding: 5px 9px; color: #244b38; background: white; border: 1px solid #c9ddcf; border-radius: 999px; font: inherit; font-weight: 700; cursor: pointer; }
+.species-filter-chip:hover { border-color: #6fa887; background: #f7fbf8; }
+.species-filter-chip:focus-visible { outline: 3px solid rgba(228, 171, 72, .42); outline-offset: 2px; }
+.species-filter-chip.active { color: white; background: var(--forest-2); border-color: var(--forest-2); box-shadow: 0 0 0 2px rgba(26, 102, 69, .13); }
 .compact-result-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .compact-result-item { min-width: 0; min-height: 88px; padding: 8px; display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; align-items: center; gap: 12px; color: var(--ink); text-align: left; background: #fbfcfa; border: 1px solid #dce4dd; border-radius: 10px; }
 .compact-result-item:hover { background: #f1f7f3; border-color: #9fb9a8; }

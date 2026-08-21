@@ -33,6 +33,7 @@ assert.match(pageHtml, /id="import-deployment-name"/);
 assert.match(pageHtml, /id="upload-result-list"/);
 assert.match(pageHtml, /id="upload-results-batch-select"/);
 assert.match(pageHtml, /id="species-result-summary"/);
+assert.match(pageHtml, /app\.js\?v=2\.7\.1/);
 assert.match(pageHtml, /id="ai-result-dialog"/);
 assert.match(pageHtml, /id="review-collection-select"/);
 assert.match(pageHtml, /class="filter-heading">篩選條件<\/div>/);
