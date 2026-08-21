@@ -1,6 +1,6 @@
 {
   "product": "野生動物辨識成果台",
-  "version": "2.6.1",
+  "version": "2.6.2",
   "buildDate": "2026-08-21",
   "deploymentId": "CAM023-2026-08-A",
   "eventCount": 154,
@@ -39,7 +39,8 @@
     "file and folder upload dialog",
     "client and server SHA-256 validation",
     "automatic event creation and compact result refresh",
-    "batch-specific manual review with status and event-content filters",
+    "batch-specific manual review with AI-result content filters",
+    "independent sidebar, dialog, and background scroll containment",
     "responsive layout",
     "no browser console errors"
   ]

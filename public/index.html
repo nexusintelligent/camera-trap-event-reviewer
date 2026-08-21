@@ -13,7 +13,7 @@
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="./icons/icon-180.png">
-  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./styles.css?v=2.6.2">
 </head>
 <body>
   <header class="topbar">
@@ -154,31 +154,39 @@
       </section>
 
       <section class="filters">
-        <label class="collection-picker">覆核資料批次
-          <select id="review-collection-select" aria-label="選擇人工覆核資料批次"></select>
-        </label>
-        <label class="search-box">
-          <span aria-hidden="true">⌕</span>
-          <input id="search-input" type="search" placeholder="事件編號、檔名、提示…">
-        </label>
-        <div class="review-filter-grid">
-          <label>覆核狀態
-            <select id="filter-select" aria-label="依覆核狀態篩選事件">
-              <option value="all">全部事件</option>
-              <option value="reviewed">已覆核</option>
-              <option value="unreviewed">尚未覆核</option>
-            </select>
-          </label>
-          <label>事件內容
-            <select id="content-filter-select" aria-label="依事件內容篩選事件">
-              <option value="all">全部內容</option>
-              <option value="empty">空觸發</option>
-              <option value="animal">有動物</option>
-              <option value="person_vehicle">人／車</option>
-            </select>
-          </label>
-        </div>
-        <div class="filter-result-count">符合條件 <strong id="filter-count">0</strong> 組</div>
+        <details class="filter-disclosure" id="review-filter-disclosure" open>
+          <summary>
+            <strong>篩選條件</strong>
+            <span>收合後可查看更多照片組</span>
+          </summary>
+          <div class="filter-controls">
+            <label class="collection-picker">覆核資料批次
+              <select id="review-collection-select" aria-label="選擇人工覆核資料批次"></select>
+            </label>
+            <label class="search-box">
+              <span aria-hidden="true">⌕</span>
+              <input id="search-input" type="search" placeholder="事件編號、檔名、提示…">
+            </label>
+            <div class="review-filter-grid">
+              <label>覆核狀態
+                <select id="filter-select" aria-label="依覆核狀態篩選事件">
+                  <option value="all">全部事件</option>
+                  <option value="reviewed">已覆核</option>
+                  <option value="unreviewed">尚未覆核</option>
+                </select>
+              </label>
+              <label>AI 事件內容
+                <select id="content-filter-select" aria-label="依 AI 辨識結果篩選事件">
+                  <option value="all">全部 AI 結果</option>
+                  <option value="empty">空觸發</option>
+                  <option value="animal">有動物</option>
+                  <option value="person_vehicle">人／車</option>
+                </select>
+              </label>
+            </div>
+            <div class="filter-result-count">符合條件 <strong id="filter-count">0</strong> 組</div>
+          </div>
+        </details>
       </section>
 
       <nav class="event-list" id="event-list" aria-label="事件清單"></nav>
@@ -454,6 +462,6 @@
   </dialog>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="./app.js"></script>
+  <script type="module" src="./app.js?v=2.6.2"></script>
 </body>
 </html>

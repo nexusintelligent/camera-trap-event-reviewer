@@ -228,6 +228,20 @@ function showToast(message, error = false) {
   showToast.timer = setTimeout(() => toast.classList.remove("show"), 2600);
 }
 
+function syncModalScrollLock() {
+  document.body.classList.toggle("modal-open", Boolean(document.querySelector("dialog[open]")));
+}
+
+function openModalDialog(dialog) {
+  if (!dialog.open) dialog.showModal();
+  syncModalScrollLock();
+}
+
+function closeModalDialog(dialog) {
+  if (dialog.open) dialog.close();
+  syncModalScrollLock();
+}
+
 function setDirty(dirty) {
   state.dirty = dirty;
   const indicator = $("#save-state");
@@ -329,8 +343,9 @@ function renderStatus() {
   $("#upload-needs-species").textContent = state.aiBatchStatus?.needsSpecies ?? 0;
 }
 
-function eventContentLabels(event) {
-  return new Set(String(event.HumanLabels || event.FinalDecision || event.VisibleClass || event.AIEventLabels || "")
+function aiEventContentLabels(event) {
+  if (event.AIStatus !== "AI_COMPLETE") return new Set();
+  return new Set(String(event.AIEventLabels || "")
     .split(";").map((label) => label.trim()).filter(Boolean));
 }
 
@@ -339,7 +354,7 @@ function applyFilter() {
   const reviewFilter = $("#filter-select").value;
   const contentFilter = $("#content-filter-select").value;
   state.filtered = reviewEvents().filter((event) => {
-    const labels = eventContentLabels(event);
+    const labels = aiEventContentLabels(event);
     const matchesReview = reviewFilter === "all"
       || (reviewFilter === "unreviewed" && !isReviewed(event))
       || (reviewFilter === "reviewed" && isReviewed(event));
@@ -785,7 +800,7 @@ function openAiResultDetail(event) {
   videoCaption.textContent = `Video · ${event.Video || "缺少檔案"}`;
   videoFigure.append(videoCaption);
   mediaGrid.append(videoFigure);
-  $("#ai-result-dialog").showModal();
+  openModalDialog($("#ai-result-dialog"));
 }
 
 function closeAiResultDetail() {
@@ -795,7 +810,7 @@ function closeAiResultDetail() {
     media.removeAttribute("src");
     media.load();
   }
-  dialog.close();
+  closeModalDialog(dialog);
   $("#ai-result-media-grid").replaceChildren();
 }
 
@@ -1222,7 +1237,7 @@ async function saveCurrent(goNext = false) {
 function openImage(source, caption) {
   $("#dialog-image").src = source;
   $("#dialog-caption").textContent = caption;
-  $("#image-dialog").showModal();
+  openModalDialog($("#image-dialog"));
 }
 
 const ACCEPTED_MEDIA_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "avi", "mp4", "mov"]);
@@ -1562,20 +1577,21 @@ function initializeControls() {
     state.uploadResultLimit += 24;
     renderUploadResults();
   });
-  $("#close-dialog").addEventListener("click", () => $("#image-dialog").close());
+  $("#close-dialog").addEventListener("click", () => closeModalDialog($("#image-dialog")));
   $("#image-dialog").addEventListener("click", (event) => {
-    if (event.target === $("#image-dialog")) $("#image-dialog").close();
+    if (event.target === $("#image-dialog")) closeModalDialog($("#image-dialog"));
   });
   $("#close-ai-result-dialog").addEventListener("click", closeAiResultDetail);
   $("#ai-result-dialog").addEventListener("click", (event) => {
     if (event.target === $("#ai-result-dialog")) closeAiResultDetail();
   });
-  $("#open-import-button").addEventListener("click", () => $("#import-dialog").showModal());
-  $("#open-import-home-button").addEventListener("click", () => $("#import-dialog").showModal());
-  $("#open-import-card-button").addEventListener("click", () => $("#import-dialog").showModal());
+  for (const dialog of document.querySelectorAll("dialog")) dialog.addEventListener("close", syncModalScrollLock);
+  $("#open-import-button").addEventListener("click", () => openModalDialog($("#import-dialog")));
+  $("#open-import-home-button").addEventListener("click", () => openModalDialog($("#import-dialog")));
+  $("#open-import-card-button").addEventListener("click", () => openModalDialog($("#import-dialog")));
   $("#upload-tab").addEventListener("click", () => showView("upload"));
   $("#review-tab").addEventListener("click", () => showView("review"));
-  $("#close-import-dialog").addEventListener("click", () => $("#import-dialog").close());
+  $("#close-import-dialog").addEventListener("click", () => closeModalDialog($("#import-dialog")));
   $("#choose-photos-button").addEventListener("click", (event) => {
     event.stopPropagation();
     $("#photo-picker").click();
