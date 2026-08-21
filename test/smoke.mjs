@@ -34,7 +34,8 @@ assert.match(pageHtml, /id="upload-result-list"/);
 assert.match(pageHtml, /id="upload-results-batch-select"/);
 assert.match(pageHtml, /id="ai-result-dialog"/);
 assert.match(pageHtml, /id="review-collection-select"/);
-assert.match(pageHtml, /id="review-filter-disclosure"/);
+assert.match(pageHtml, /class="filter-heading">篩選條件<\/div>/);
+assert.doesNotMatch(pageHtml, /id="review-filter-disclosure"/);
 assert.match(pageHtml, /id="content-filter-select"/);
 assert.match(pageHtml, /<option value="empty">空觸發<\/option>/);
 assert.match(pageHtml, /<option value="animal">有動物<\/option>/);
@@ -55,11 +56,12 @@ assert.match(appSource, /contentFilter === "person_vehicle"/);
 assert.match(appSource, /function syncModalScrollLock\(\)/);
 checks.push("ui:batch-separated-result-and-review-logic");
 
-const stylesResponse = await fetch(`${baseUrl}/styles.css?v=2.6.2`);
+const stylesResponse = await fetch(`${baseUrl}/styles.css?v=2.6.3`);
 const stylesSource = await stylesResponse.text();
 assert.equal(stylesResponse.status, 200);
 assert.match(stylesSource, /body\.modal-open \{ overflow: hidden;/);
-assert.match(stylesSource, /\.event-list \{[^}]*flex: 1 1 auto;/s);
+assert.match(stylesSource, /\.sidebar \{[^}]*overflow-y: auto;/s);
+assert.match(stylesSource, /\.event-list \{[^}]*overflow: visible;/s);
 assert.match(stylesSource, /overscroll-behavior: contain/);
 checks.push("ui:independent-sidebar-and-modal-scrolling");
 
