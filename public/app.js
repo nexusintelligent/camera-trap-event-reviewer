@@ -67,6 +67,10 @@ const state = {
   aiBatchStatus: null,
   aiBatchPollTimer: null,
   currentView: "upload",
+  reviewCollectionId: "registered",
+  uploadBatchId: "",
+  uploadResultFilter: "all",
+  uploadResultLimit: 24,
   status: { total: 0, reviewed: 0, unreviewed: 0 },
 };
 
@@ -99,6 +103,7 @@ const $ = (selector) => document.querySelector(selector);
 const eventList = $("#event-list");
 const annotationForm = $("#annotation-form");
 const toast = $("#toast");
+const eventCollator = new Intl.Collator("zh-Hant", { numeric: true, sensitivity: "base" });
 
 function currentEvent() {
   return state.events.find((event) => event.EventID === state.currentId);
@@ -116,12 +121,62 @@ function aiBatchUrl() {
   return serviceUrl(`/api/ai/batch?identifySpecies=${shouldIdentifySpecies() ? "1" : "0"}&mode=${selectedAiMode()}`);
 }
 
-function isReviewEvent(event) {
+function isRegisteredEvent(event) {
   return Boolean(event) && event.SourceType !== "web_upload";
+}
+
+function isReviewEvent(event) {
+  if (!event) return false;
+  return state.reviewCollectionId === "registered"
+    ? isRegisteredEvent(event)
+    : event.SourceType === "web_upload" && event.DeploymentID === state.reviewCollectionId;
 }
 
 function reviewEvents() {
   return state.events.filter(isReviewEvent);
+}
+
+function webBatchEntries() {
+  const grouped = new Map();
+  for (const event of state.events.filter((item) => item.SourceType === "web_upload")) {
+    if (!grouped.has(event.DeploymentID)) grouped.set(event.DeploymentID, []);
+    grouped.get(event.DeploymentID).push(event);
+  }
+  return [...grouped.entries()].map(([deploymentId, events]) => ({ deploymentId, events })).reverse();
+}
+
+function uploadBatchEvents() {
+  return state.events.filter((event) => event.SourceType === "web_upload" && event.DeploymentID === state.uploadBatchId);
+}
+
+function collectionLabel(deploymentId, events) {
+  const sourceRoot = String(events[0]?.SourceRelativePaths || "").split(";")[0]?.split("/")[0] || deploymentId;
+  const uniqueSuffix = deploymentId.startsWith(`${sourceRoot}-`) ? deploymentId.slice(sourceRoot.length + 1) : "";
+  return `${sourceRoot}${uniqueSuffix ? ` · ${uniqueSuffix}` : ""}（${events.length} 組）`;
+}
+
+function syncCollectionSelectors(preferredUploadBatchId = "") {
+  const batches = webBatchEntries();
+  const validReviewIds = new Set(["registered", ...batches.map((batch) => batch.deploymentId)]);
+  if (!validReviewIds.has(state.reviewCollectionId)) state.reviewCollectionId = "registered";
+  const preferred = preferredUploadBatchId || state.uploadBatchId;
+  state.uploadBatchId = batches.some((batch) => batch.deploymentId === preferred)
+    ? preferred
+    : (batches[0]?.deploymentId || "");
+
+  const reviewSelect = $("#review-collection-select");
+  reviewSelect.replaceChildren();
+  const registered = state.events.filter(isRegisteredEvent);
+  reviewSelect.append(new Option(`人工覆核基準資料（${registered.length} 組）`, "registered"));
+  for (const batch of batches) reviewSelect.append(new Option(collectionLabel(batch.deploymentId, batch.events), batch.deploymentId));
+  reviewSelect.value = state.reviewCollectionId;
+
+  const uploadSelect = $("#upload-results-batch-select");
+  uploadSelect.replaceChildren();
+  if (!batches.length) uploadSelect.append(new Option("尚未匯入事件", ""));
+  for (const batch of batches) uploadSelect.append(new Option(collectionLabel(batch.deploymentId, batch.events), batch.deploymentId));
+  uploadSelect.value = state.uploadBatchId;
+  uploadSelect.disabled = batches.length === 0;
 }
 
 function showView(view, updateHash = true) {
@@ -132,9 +187,10 @@ function showView(view, updateHash = true) {
     setDirty(false);
   }
   state.currentView = nextView;
-  if (nextView === "review" && !isReviewEvent(currentEvent())) {
+  if (nextView === "review" && !reviewEvents().some((event) => event.EventID === state.currentId)) {
     state.currentId = reviewEvents()[0]?.EventID || null;
     if (state.currentId) renderCurrentEvent();
+    else renderEmptyReviewState();
   }
   $("#upload-view").hidden = nextView !== "upload";
   $("#review-view").hidden = nextView !== "review";
@@ -243,8 +299,11 @@ function localDate() {
 }
 
 function isReviewed(event) {
-  return ["HUMAN_CONFIRMED", "UNCERTAIN", "CONFLICT", "double_checked", "adjudicated"].includes(event.ReviewStatus)
-    || Boolean(event.FinalDecision && ["first_pass", "double_checked", "adjudicated"].includes(event.ReviewStatus));
+  const status = String(event.ReviewStatus || "");
+  const hasHumanDecision = Boolean(event.HumanLabels || event.FinalDecision || event.PhotoOnlyDecision);
+  if (["HUMAN_CONFIRMED", "UNCERTAIN", "CONFLICT", "double_checked", "adjudicated"].includes(status)) return true;
+  if (status === "first_pass" && hasHumanDecision) return true;
+  return Boolean(event.ReviewedAt && hasHumanDecision);
 }
 
 function recalculateStatus() {
@@ -265,7 +324,6 @@ function renderStatus() {
   const species = new Set(reviewCollection.flatMap((event) => String(event.AISpecies || event.CommonName || "")
     .split(";").map((value) => value.trim()).filter(Boolean)));
   $("#summary-species").textContent = species.size;
-  $("#review-tab-count").textContent = total || 0;
   $("#upload-ai-complete").textContent = state.aiBatchStatus?.complete ?? 0;
   $("#upload-empty").textContent = state.aiBatchStatus?.emptyTrigger ?? 0;
   $("#upload-needs-species").textContent = state.aiBatchStatus?.needsSpecies ?? 0;
@@ -280,6 +338,7 @@ function applyFilter() {
       filter === "all"
       || (filter === "unreviewed" && !isReviewed(event))
       || (filter === "reviewed" && isReviewed(event))
+      || (filter === "ai_complete" && event.AIStatus === "AI_COMPLETE")
       || (filter === "ai_pending" && ["AI_PENDING", "AI_RUNNING"].includes(event.AIStatus))
       || (filter === "needs_review" && event.ReviewStatus === "NEEDS_REVIEW")
       || (filter === "conflict" && event.ReviewStatus === "CONFLICT")
@@ -291,13 +350,30 @@ function applyFilter() {
     if (!query) return true;
     return [event.EventID, event.Photo1, event.Photo2, event.Photo3, event.Video, event.filenameHint, event.CommonName, event.TaxonCode]
       .join(" ").toLocaleLowerCase().includes(query);
+  }).sort((left, right) => {
+    const timeOrder = String(left.EventTime || "").localeCompare(String(right.EventTime || ""));
+    return timeOrder || eventCollator.compare(left.EventID, right.EventID);
   });
   $("#filter-count").textContent = state.filtered.length;
+  if (!state.filtered.some((event) => event.EventID === state.currentId) && !state.dirty) {
+    state.currentId = state.filtered[0]?.EventID || null;
+    if (state.currentView === "review") {
+      if (state.currentId) renderCurrentEvent();
+      else renderEmptyReviewState();
+    }
+  }
   renderEventList();
 }
 
 function renderEventList() {
   eventList.replaceChildren();
+  if (!state.filtered.length) {
+    const empty = document.createElement("div");
+    empty.className = "event-list-empty";
+    empty.textContent = "此批次沒有符合目前篩選條件的事件。";
+    eventList.append(empty);
+    return;
+  }
   for (const event of state.filtered) {
     const button = document.createElement("button");
     button.type = "button";
@@ -486,6 +562,7 @@ async function refreshAiFields(eventId) {
   recalculateStatus();
   renderStatus();
   renderEventList();
+  renderUploadResults();
 }
 
 async function refreshAllAiFields() {
@@ -505,6 +582,7 @@ async function refreshAllAiFields() {
     renderAiResult(currentEvent());
     renderMetadata(currentEvent());
   }
+  renderUploadResults();
 }
 
 function renderAiBatch(status = state.aiBatchStatus) {
@@ -555,6 +633,169 @@ function renderAiBatch(status = state.aiBatchStatus) {
   $("#ai-goal-note").textContent = shouldIdentifySpecies()
     ? "動物事件會自動接續 SpeciesNet；空觸發、人與車輛不會增加物種辨識時間。"
     : "目前只判斷空觸發、動物、人與車輛，不執行物種辨識。";
+  renderUploadResults();
+}
+
+function aiResultCategory(event) {
+  if (event.AIStatus !== "AI_COMPLETE") return "pending";
+  const labels = new Set(String(event.AIEventLabels || "").split(";").filter(Boolean));
+  if (labels.has("animal")) return "needs_species";
+  if (labels.has("person") || labels.has("vehicle")) return "other_nonempty";
+  return "empty";
+}
+
+function aiResultLabel(event) {
+  const category = aiResultCategory(event);
+  if (event.AIStatus === "FAILED") return "辨識失敗";
+  if (category === "pending") return event.AIStatus === "AI_RUNNING" ? "辨識中" : "尚未辨識";
+  if (category === "empty") return "空觸發";
+  if (category === "other_nonempty") return "非空觸發（人／車輛）";
+  return event.AISpecies ? `動物 · ${event.AISpecies}` : "需要辨識物種";
+}
+
+function renderUploadResults() {
+  const list = $("#upload-result-list");
+  if (!list) return;
+  const batch = uploadBatchEvents().sort((left, right) => {
+    const timeOrder = String(left.EventTime || "").localeCompare(String(right.EventTime || ""));
+    return timeOrder || eventCollator.compare(left.EventID, right.EventID);
+  });
+  const counts = {
+    all: batch.length,
+    empty: batch.filter((event) => aiResultCategory(event) === "empty").length,
+    needs_species: batch.filter((event) => aiResultCategory(event) === "needs_species").length,
+    other_nonempty: batch.filter((event) => aiResultCategory(event) === "other_nonempty").length,
+    pending: batch.filter((event) => aiResultCategory(event) === "pending").length,
+  };
+  $("#result-count-all").textContent = counts.all;
+  $("#result-count-empty").textContent = counts.empty;
+  $("#result-count-species").textContent = counts.needs_species;
+  $("#result-count-other").textContent = counts.other_nonempty;
+  $("#result-count-pending").textContent = counts.pending;
+  for (const button of document.querySelectorAll("#upload-result-tabs [data-result-filter]")) {
+    button.classList.toggle("active", button.dataset.resultFilter === state.uploadResultFilter);
+  }
+  const completed = batch.length - counts.pending;
+  $("#upload-results-meta").textContent = batch.length
+    ? `此匯入批次共 ${batch.length} 組 · AI 已完成 ${completed} 組 · 空觸發 ${counts.empty} 組 · 動物事件 ${counts.needs_species} 組`
+    : "尚未匯入事件。完成上傳後，辨識結果會依批次顯示在這裡。";
+
+  const filtered = batch.filter((event) => state.uploadResultFilter === "all" || aiResultCategory(event) === state.uploadResultFilter);
+  list.replaceChildren();
+  if (!filtered.length) {
+    const empty = document.createElement("div");
+    empty.className = "compact-results-empty";
+    empty.textContent = batch.length ? "這個分類目前沒有事件。" : "尚無可顯示的辨識結果。";
+    list.append(empty);
+  }
+  for (const event of filtered.slice(0, state.uploadResultLimit)) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "compact-result-item";
+    button.addEventListener("click", () => openAiResultDetail(event));
+
+    const preview = document.createElement("span");
+    preview.className = "compact-result-preview";
+    if (event.media.Photo1) {
+      const image = document.createElement("img");
+      image.src = event.media.Photo1;
+      image.alt = `${event.EventID} 第一張照片`;
+      image.loading = "lazy";
+      image.addEventListener("error", () => preview.classList.add("load-error"));
+      preview.append(image);
+    } else {
+      preview.textContent = "無照片";
+    }
+
+    const copy = document.createElement("span");
+    copy.className = "compact-result-copy";
+    const title = document.createElement("strong");
+    title.textContent = event.EventID.replace(`${event.DeploymentID}-`, "");
+    const result = document.createElement("span");
+    result.className = `compact-result-status category-${aiResultCategory(event)}`;
+    result.textContent = aiResultLabel(event);
+    const meta = document.createElement("small");
+    meta.textContent = `${event.EventTime || "無拍攝時間"}${event.AIConfidence ? ` · 信心 ${event.AIConfidence}` : ""}`;
+    copy.append(title, result, meta);
+
+    const detail = document.createElement("span");
+    detail.className = "compact-result-open";
+    detail.textContent = "查看詳細 →";
+    button.append(preview, copy, detail);
+    list.append(button);
+  }
+  const moreButton = $("#upload-results-more");
+  moreButton.hidden = filtered.length <= state.uploadResultLimit;
+  if (!moreButton.hidden) moreButton.textContent = `顯示更多（尚有 ${filtered.length - state.uploadResultLimit} 組）`;
+}
+
+function openAiResultDetail(event) {
+  $("#ai-result-dialog-deployment").textContent = event.DeploymentID;
+  $("#ai-result-dialog-title").textContent = event.EventID;
+  $("#ai-result-dialog-summary").textContent = `${event.EventTime || "無拍攝時間"} · ${aiResultLabel(event)}`;
+  const detailGrid = $("#ai-result-detail-grid");
+  detailGrid.replaceChildren();
+  for (const [label, value] of [
+    ["事件結果", aiResultLabel(event)],
+    ["AI 狀態", event.AIStatus || "AI_PENDING"],
+    ["物種中文候選", event.AISpecies || "—"],
+    ["信心", event.AIConfidence || "—"],
+  ]) {
+    const item = document.createElement("div");
+    const name = document.createElement("span");
+    name.textContent = label;
+    const content = document.createElement("strong");
+    content.textContent = value;
+    item.append(name, content);
+    detailGrid.append(item);
+  }
+
+  const mediaGrid = $("#ai-result-media-grid");
+  mediaGrid.replaceChildren();
+  for (const key of ["Photo1", "Photo2", "Photo3"]) {
+    const figure = document.createElement("figure");
+    if (event.media[key]) {
+      const image = document.createElement("img");
+      image.src = event.media[key];
+      image.alt = `${event.EventID} ${key}`;
+      image.loading = "eager";
+      image.addEventListener("click", () => openImage(event.media[key], event[key]));
+      figure.append(image);
+    }
+    const caption = document.createElement("figcaption");
+    caption.textContent = `${key} · ${event[key] || "缺少檔案"}`;
+    figure.append(caption);
+    mediaGrid.append(figure);
+  }
+  const videoFigure = document.createElement("figure");
+  if (event.media.Video) {
+    const video = document.createElement("video");
+    video.src = event.media.Video;
+    video.controls = true;
+    video.preload = "metadata";
+    videoFigure.append(video);
+  } else {
+    const missing = document.createElement("div");
+    missing.className = "ai-result-video-missing";
+    missing.textContent = "此事件沒有影片";
+    videoFigure.append(missing);
+  }
+  const videoCaption = document.createElement("figcaption");
+  videoCaption.textContent = `Video · ${event.Video || "缺少檔案"}`;
+  videoFigure.append(videoCaption);
+  mediaGrid.append(videoFigure);
+  $("#ai-result-dialog").showModal();
+}
+
+function closeAiResultDetail() {
+  const dialog = $("#ai-result-dialog");
+  for (const media of dialog.querySelectorAll("video")) {
+    media.pause();
+    media.removeAttribute("src");
+    media.load();
+  }
+  dialog.close();
+  $("#ai-result-media-grid").replaceChildren();
 }
 
 async function pollAiBatch() {
@@ -857,14 +1098,29 @@ function setFormValues(event) {
   syncDecisionButtons("#photo-decision-buttons", event.PhotoOnlyDecision || "");
 }
 
+function renderEmptyReviewState() {
+  $("#review-view").classList.add("empty-review");
+  $("#deployment-label").textContent = "REVIEW COLLECTION";
+  $("#event-id").textContent = "沒有符合條件的事件";
+  $("#event-time").textContent = "請調整資料批次、覆核狀態或搜尋條件。";
+  $("#event-position").textContent = "0 / 0";
+  $("#previous-button").disabled = true;
+  $("#next-button").disabled = true;
+  $("#metadata-strip").replaceChildren();
+  setDirty(false);
+}
+
 function renderCurrentEvent() {
   const event = currentEvent();
-  if (!event) return;
+  if (!event) return renderEmptyReviewState();
+  $("#review-view").classList.remove("empty-review");
   $("#deployment-label").textContent = event.DeploymentID;
   $("#event-id").textContent = event.EventID;
   $("#event-time").textContent = event.EventTime || "沒有事件時間";
   const position = state.filtered.findIndex((candidate) => candidate.EventID === event.EventID);
   $("#event-position").textContent = position >= 0 ? `${position + 1} / ${state.filtered.length}` : `— / ${state.filtered.length}`;
+  $("#previous-button").disabled = position <= 0;
+  $("#next-button").disabled = position < 0 || position >= state.filtered.length - 1;
   renderMetadata(event);
   renderPhotos(event);
   renderVideo(event);
@@ -1129,6 +1385,8 @@ async function reloadEventCollection(preferredId = "") {
   const response = await fetch(serviceUrl("/api/events"));
   const payload = await responseJson(response, "無法重新載入事件成果。");
   state.events = payload.events.map(normalizeEvent);
+  const preferredBatchId = state.events.find((event) => event.EventID === preferredId && event.SourceType === "web_upload")?.DeploymentID || "";
+  syncCollectionSelectors(preferredBatchId);
   recalculateStatus();
   state.currentId = state.events.some((event) => event.EventID === preferredId)
     ? preferredId
@@ -1136,6 +1394,8 @@ async function reloadEventCollection(preferredId = "") {
   renderStatus();
   applyFilter();
   if (state.currentId) renderCurrentEvent();
+  else renderEmptyReviewState();
+  renderUploadResults();
 }
 
 async function uploadImportJob() {
@@ -1266,9 +1526,45 @@ function initializeControls() {
   $("#save-next-button").addEventListener("click", () => saveCurrent(true));
   $("#search-input").addEventListener("input", applyFilter);
   $("#filter-select").addEventListener("change", applyFilter);
+  $("#review-collection-select").addEventListener("change", (event) => {
+    const previous = state.reviewCollectionId;
+    if (state.dirty && !window.confirm("目前事件尚未儲存。要放棄修改並切換覆核資料批次嗎？")) {
+      event.target.value = previous;
+      return;
+    }
+    state.reviewCollectionId = event.target.value || "registered";
+    state.currentId = null;
+    $("#filter-select").value = "all";
+    $("#search-input").value = "";
+    setDirty(false);
+    recalculateStatus();
+    renderStatus();
+    applyFilter();
+  });
+  $("#upload-results-batch-select").addEventListener("change", (event) => {
+    state.uploadBatchId = event.target.value;
+    state.uploadResultFilter = "all";
+    state.uploadResultLimit = 24;
+    renderUploadResults();
+  });
+  $("#upload-result-tabs").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-result-filter]");
+    if (!button) return;
+    state.uploadResultFilter = button.dataset.resultFilter;
+    state.uploadResultLimit = 24;
+    renderUploadResults();
+  });
+  $("#upload-results-more").addEventListener("click", () => {
+    state.uploadResultLimit += 24;
+    renderUploadResults();
+  });
   $("#close-dialog").addEventListener("click", () => $("#image-dialog").close());
   $("#image-dialog").addEventListener("click", (event) => {
     if (event.target === $("#image-dialog")) $("#image-dialog").close();
+  });
+  $("#close-ai-result-dialog").addEventListener("click", closeAiResultDetail);
+  $("#ai-result-dialog").addEventListener("click", (event) => {
+    if (event.target === $("#ai-result-dialog")) closeAiResultDetail();
   });
   $("#open-import-button").addEventListener("click", () => $("#import-dialog").showModal());
   $("#open-import-home-button").addEventListener("click", () => $("#import-dialog").showModal());
@@ -1364,6 +1660,7 @@ async function start() {
     const eventPayload = await eventsResponse.json();
     const batchPayload = await batchResponse.json();
     state.events = eventPayload.events.map(normalizeEvent);
+    syncCollectionSelectors();
     recalculateStatus();
     state.aiBatchStatus = batchPayload.status;
     state.aiBatchActive = Boolean(batchPayload.status?.active);
@@ -1374,10 +1671,8 @@ async function start() {
     document.title = `${state.config.appName} · ${state.config.deploymentId}`;
     renderStatus();
     applyFilter();
-    if (state.events.length) {
-      state.currentId = state.events[0].EventID;
-      renderCurrentEvent();
-    }
+    if (state.currentId) renderCurrentEvent();
+    else renderEmptyReviewState();
     renderAiBatch(state.aiBatchStatus);
     if (state.aiBatchActive) pollAiBatch();
   } catch (error) {

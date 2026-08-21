@@ -26,7 +26,7 @@
     </div>
     <nav class="primary-tabs" aria-label="主要功能">
       <button class="primary-tab active" id="upload-tab" type="button" aria-selected="true">上傳與 AI 初篩</button>
-      <button class="primary-tab" id="review-tab" type="button" aria-selected="false">人工覆核 <span id="review-tab-count">154</span></button>
+      <button class="primary-tab" id="review-tab" type="button" aria-selected="false">人工覆核</button>
     </nav>
     <div class="top-actions">
       <button class="button ghost" id="open-import-button" type="button">上傳媒體</button>
@@ -120,6 +120,29 @@
         </div>
       </article>
     </section>
+
+    <section class="upload-results-card" aria-labelledby="upload-results-title">
+      <div class="upload-results-head">
+        <div>
+          <div class="card-kicker">03 · 當次辨識結果</div>
+          <h3 id="upload-results-title">快速查看每一組的 AI 判定</h3>
+          <p>清單只顯示一張小縮圖與主要結果；點開事件後才載入三張照片與影片。</p>
+        </div>
+        <label class="batch-select-label">查看匯入批次
+          <select id="upload-results-batch-select" aria-label="選擇辨識結果批次"></select>
+        </label>
+      </div>
+      <div class="upload-result-tabs" id="upload-result-tabs" aria-label="篩選當次辨識結果">
+        <button class="active" type="button" data-result-filter="all">全部 <span id="result-count-all">0</span></button>
+        <button type="button" data-result-filter="empty">空觸發 <span id="result-count-empty">0</span></button>
+        <button type="button" data-result-filter="needs_species">需要辨識物種 <span id="result-count-species">0</span></button>
+        <button type="button" data-result-filter="other_nonempty">人／車輛 <span id="result-count-other">0</span></button>
+        <button type="button" data-result-filter="pending">尚未完成 <span id="result-count-pending">0</span></button>
+      </div>
+      <div class="upload-results-meta" id="upload-results-meta">尚未匯入事件。</div>
+      <div class="compact-result-list" id="upload-result-list"></div>
+      <button class="button ghost results-more-button" id="upload-results-more" type="button" hidden>顯示更多結果</button>
+    </section>
   </main>
 
   <div class="app-shell" id="review-view" hidden>
@@ -131,6 +154,9 @@
       </section>
 
       <section class="filters">
+        <label class="collection-picker">覆核資料批次
+          <select id="review-collection-select" aria-label="選擇人工覆核資料批次"></select>
+        </label>
         <label class="search-box">
           <span aria-hidden="true">⌕</span>
           <input id="search-input" type="search" placeholder="事件編號、檔名、提示…">
@@ -140,6 +166,7 @@
             <option value="all">全部事件</option>
             <option value="unreviewed">尚未覆核</option>
             <option value="reviewed">已覆核</option>
+            <option value="ai_complete">AI 已辨識</option>
             <option value="ai_pending">AI 待處理</option>
             <option value="needs_review">需要人工覆核</option>
             <option value="conflict">AI／人工衝突</option>
@@ -373,10 +400,25 @@
     <div id="dialog-caption"></div>
   </dialog>
 
+  <dialog id="ai-result-dialog" class="ai-result-dialog">
+    <div class="dialog-head">
+      <div>
+        <div class="eyebrow" id="ai-result-dialog-deployment">AI RESULT</div>
+        <h2 id="ai-result-dialog-title">事件辨識結果</h2>
+        <p id="ai-result-dialog-summary"></p>
+      </div>
+      <button class="dialog-close" id="close-ai-result-dialog" type="button" aria-label="關閉">×</button>
+    </div>
+    <div class="ai-result-dialog-body">
+      <div class="ai-result-detail-grid" id="ai-result-detail-grid"></div>
+      <div class="ai-result-media-grid" id="ai-result-media-grid"></div>
+    </div>
+  </dialog>
+
   <dialog id="import-dialog" class="import-dialog">
     <div class="dialog-head">
       <div>
-        <div class="eyebrow">WEB UPLOAD · V2.5</div>
+        <div class="eyebrow">WEB UPLOAD · V2.6</div>
         <h2>上傳媒體並建立事件</h2>
       </div>
       <button id="close-import-dialog" type="button" aria-label="關閉">×</button>

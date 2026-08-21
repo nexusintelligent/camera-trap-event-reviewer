@@ -30,8 +30,22 @@ assert.match(pageHtml, /id="clear-import-button"/);
 assert.match(pageHtml, /id="upload-view"/);
 assert.match(pageHtml, /id="review-view"/);
 assert.match(pageHtml, /id="import-deployment-name"/);
+assert.match(pageHtml, /id="upload-result-list"/);
+assert.match(pageHtml, /id="upload-results-batch-select"/);
+assert.match(pageHtml, /id="ai-result-dialog"/);
+assert.match(pageHtml, /id="review-collection-select"/);
+assert.match(pageHtml, /<option value="ai_complete">AI 已辨識<\/option>/);
+assert.match(pageHtml, /id="review-tab"[^>]*>人工覆核<\/button>/);
 assert.match(pageHtml, /上傳並建立事件/);
-checks.push("pwa:html-metadata");
+checks.push("pwa:batch-results-and-review-controls");
+
+const appResponse = await fetch(`${baseUrl}/app.js`);
+const appSource = await appResponse.text();
+assert.equal(appResponse.status, 200);
+assert.match(appSource, /function webBatchEntries\(\)/);
+assert.match(appSource, /function renderUploadResults\(\)/);
+assert.match(appSource, /filter === "ai_complete"/);
+checks.push("ui:batch-separated-result-and-review-logic");
 
 const manifestResponse = await fetch(`${baseUrl}/manifest.webmanifest`);
 assert.equal(manifestResponse.status, 200);

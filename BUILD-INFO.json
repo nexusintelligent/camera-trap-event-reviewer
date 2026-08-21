@@ -1,11 +1,11 @@
 {
   "product": "野生動物辨識成果台",
-  "version": "2.5.0",
-  "buildDate": "2026-08-20",
+  "version": "2.6.0",
+  "buildDate": "2026-08-21",
   "deploymentId": "CAM023-2026-08-A",
   "eventCount": 154,
   "mediaCount": 616,
-  "workflow": "browser upload, server-side validation, automatic event grouping, MegaDetector/SpeciesNet inference, result review and export",
+  "workflow": "batch-separated browser upload, compact AI triage results, MegaDetector/SpeciesNet inference, batch-specific human review and export",
   "runtime": "Node.js local service plus Python 3.11 AI runtime",
   "listenAddress": "127.0.0.1",
   "inferenceAvailable": true,
@@ -29,7 +29,8 @@
     "path traversal rejection",
     "web upload manifest validation",
     "server-side SHA-256 and media signature validation",
-    "automatic web event persistence"
+    "automatic web event persistence",
+    "import-batch separation and deterministic review filters"
   ],
   "browserChecks": [
     "event media rendered",
@@ -37,7 +38,8 @@
     "separate AI result panel and run control",
     "file and folder upload dialog",
     "client and server SHA-256 validation",
-    "automatic event creation and result refresh",
+    "automatic event creation and compact result refresh",
+    "batch-specific manual review and AI-complete filtering",
     "responsive layout",
     "no browser console errors"
   ]
