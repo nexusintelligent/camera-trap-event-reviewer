@@ -1,4 +1,4 @@
-const CACHE_NAME = "camera-trap-reviewer-shell-v2.8.0";
+const CACHE_NAME = "camera-trap-reviewer-shell-v2.11.1";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -33,7 +33,7 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
 
   // Annotation data and camera media always come from the live local service.
-  if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/media/")) return;
+  if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/media/") || url.pathname.startsWith("/video-preview/")) return;
 
   if (request.mode === "navigate") {
     event.respondWith(

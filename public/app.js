@@ -43,8 +43,13 @@ const EDITABLE_FIELDS = [
 
 const AI_RESULT_FIELDS = [
   "AIStatus", "AIEventLabels", "AISpecies", "AISpeciesConfidence", "AIConfidence", "AIModelName",
-  "AIModelVersion", "AIProcessedAt", "AIError", "ReviewStatus",
+  "AIModelVersion", "AIProcessedAt", "AIError", "AIRepeatDetection", "AIRepeatDetectionSupport", "ReviewStatus",
 ];
+
+const EVENT_SYNC_CHANNEL = "camera-trap-event-sync-v1";
+const eventSyncChannel = "BroadcastChannel" in window ? new BroadcastChannel(EVENT_SYNC_CHANNEL) : null;
+let eventSyncPromise = null;
+let lastEventSyncAt = 0;
 
 const state = {
   config: null,
@@ -68,10 +73,13 @@ const state = {
   aiBatchPollTimer: null,
   currentView: "upload",
   reviewCollectionId: "registered",
+  aiBatchId: "",
   uploadBatchId: "",
   uploadResultFilter: "all",
   uploadSpeciesFilter: "",
   uploadResultLimit: 24,
+  imageGallery: [],
+  imageGalleryIndex: 0,
   status: { total: 0, reviewed: 0, unreviewed: 0 },
 };
 
@@ -100,6 +108,7 @@ function normalizeEvent(event) {
     thumbnails: Object.fromEntries(
       Object.entries(event.thumbnails || {}).map(([key, value]) => [key, value ? serviceUrl(value) : ""]),
     ),
+    videoPreview: event.videoPreview ? serviceUrl(event.videoPreview) : "",
   };
 }
 
@@ -122,7 +131,12 @@ function shouldIdentifySpecies() {
 }
 
 function aiBatchUrl() {
-  return serviceUrl(`/api/ai/batch?identifySpecies=${shouldIdentifySpecies() ? "1" : "0"}&mode=${selectedAiMode()}`);
+  const parameters = new URLSearchParams({
+    identifySpecies: shouldIdentifySpecies() ? "1" : "0",
+    mode: selectedAiMode(),
+  });
+  if (state.aiBatchId) parameters.set("deploymentId", state.aiBatchId);
+  return serviceUrl(`/api/ai/batch?${parameters}`);
 }
 
 function isRegisteredEvent(event) {
@@ -153,19 +167,27 @@ function uploadBatchEvents() {
   return state.events.filter((event) => event.SourceType === "web_upload" && event.DeploymentID === state.uploadBatchId);
 }
 
+function selectedAiBatchEvents() {
+  return state.events.filter((event) => event.SourceType === "web_upload" && event.DeploymentID === state.aiBatchId);
+}
+
 function collectionLabel(deploymentId, events) {
   const sourceRoot = String(events[0]?.SourceRelativePaths || "").split(";")[0]?.split("/")[0] || deploymentId;
   const uniqueSuffix = deploymentId.startsWith(`${sourceRoot}-`) ? deploymentId.slice(sourceRoot.length + 1) : "";
   return `${sourceRoot}${uniqueSuffix ? ` · ${uniqueSuffix}` : ""}（${events.length} 組）`;
 }
 
-function syncCollectionSelectors(preferredUploadBatchId = "") {
+function syncCollectionSelectors(preferredUploadBatchId = "", preferredAiBatchId = "") {
   const batches = webBatchEntries();
   const validReviewIds = new Set(["registered", ...batches.map((batch) => batch.deploymentId)]);
   if (!validReviewIds.has(state.reviewCollectionId)) state.reviewCollectionId = "registered";
   const preferred = preferredUploadBatchId || state.uploadBatchId;
   state.uploadBatchId = batches.some((batch) => batch.deploymentId === preferred)
     ? preferred
+    : (batches[0]?.deploymentId || "");
+  const preferredAi = preferredAiBatchId || state.aiBatchId;
+  state.aiBatchId = batches.some((batch) => batch.deploymentId === preferredAi)
+    ? preferredAi
     : (batches[0]?.deploymentId || "");
 
   const reviewSelect = $("#review-collection-select");
@@ -181,6 +203,13 @@ function syncCollectionSelectors(preferredUploadBatchId = "") {
   for (const batch of batches) uploadSelect.append(new Option(collectionLabel(batch.deploymentId, batch.events), batch.deploymentId));
   uploadSelect.value = state.uploadBatchId;
   uploadSelect.disabled = batches.length === 0;
+
+  const aiSelect = $("#ai-batch-select");
+  aiSelect.replaceChildren();
+  if (!batches.length) aiSelect.append(new Option("尚未匯入事件", ""));
+  for (const batch of batches) aiSelect.append(new Option(collectionLabel(batch.deploymentId, batch.events), batch.deploymentId));
+  aiSelect.value = state.aiBatchId;
+  aiSelect.disabled = batches.length === 0 || Boolean(state.aiBatchStatus?.globalActive);
 }
 
 function showView(view, updateHash = true) {
@@ -204,6 +233,7 @@ function showView(view, updateHash = true) {
   $("#review-tab").setAttribute("aria-selected", String(nextView === "review"));
   for (const element of document.querySelectorAll(".review-only")) element.hidden = nextView !== "review";
   if (updateHash) history.replaceState(null, "", nextView === "review" ? "#review" : "#upload");
+  if (state.serverAvailable) requestEventSync("view-change", true);
 }
 
 function aiTriageLabel(event) {
@@ -349,8 +379,13 @@ function renderStatus() {
 
 function aiEventContentLabels(event) {
   if (event.AIStatus !== "AI_COMPLETE") return new Set();
-  return new Set(String(event.AIEventLabels || "")
+  const labels = new Set(String(event.AIEventLabels || "")
     .split(";").map((label) => label.trim()).filter(Boolean));
+  if (event.AIRepeatDetection === "yes") {
+    labels.delete("animal");
+    labels.add("repeat_detection");
+  }
+  return labels;
 }
 
 function applyFilter() {
@@ -365,6 +400,7 @@ function applyFilter() {
     const matchesContent = contentFilter === "all"
       || (contentFilter === "empty" && labels.has("empty"))
       || (contentFilter === "animal" && labels.has("animal"))
+      || (contentFilter === "repeat_detection" && labels.has("repeat_detection"))
       || (contentFilter === "person_vehicle" && (labels.has("person") || labels.has("vehicle")));
     if (!matchesReview || !matchesContent) return false;
     if (!query) return true;
@@ -456,7 +492,7 @@ function renderPhotos(event) {
       image.src = event.media[key];
       image.alt = `${event.EventID} ${key}`;
       image.loading = "eager";
-      image.addEventListener("click", () => openImage(event.media[key], event[key]));
+      image.addEventListener("click", () => openImage(event, key));
       image.addEventListener("error", () => {
         image.alt = `無法載入 ${event[key]}`;
         frame.classList.add("load-error");
@@ -567,42 +603,13 @@ function renderAiResult(event) {
 }
 
 async function refreshAiFields(eventId) {
-  const response = await fetch(serviceUrl("/api/events"));
-  if (!response.ok) throw new Error("無法重新讀取 AI 結果。");
-  const payload = await response.json();
-  const remote = payload.events.find((event) => event.EventID === eventId);
-  const local = state.events.find((event) => event.EventID === eventId);
-  if (remote && local) {
-    for (const field of AI_RESULT_FIELDS) local[field] = remote[field] || "";
-    if (state.currentId === eventId) {
-      renderAiResult(local);
-      renderMetadata(local);
-    }
-  }
-  recalculateStatus();
-  renderStatus();
-  renderEventList();
-  renderUploadResults();
+  await syncEventsFromServer({ reason: `ai-event:${eventId}` });
+  notifyEventDataChanged("ai-result");
 }
 
 async function refreshAllAiFields() {
-  const response = await fetch(serviceUrl("/api/events"));
-  if (!response.ok) throw new Error("無法更新批次 AI 結果。");
-  const payload = await response.json();
-  const remoteById = new Map(payload.events.map((event) => [event.EventID, event]));
-  for (const local of state.events) {
-    const remote = remoteById.get(local.EventID);
-    if (!remote) continue;
-    for (const field of AI_RESULT_FIELDS) local[field] = remote[field] || "";
-  }
-  recalculateStatus();
-  renderStatus();
-  renderEventList();
-  if (currentEvent()) {
-    renderAiResult(currentEvent());
-    renderMetadata(currentEvent());
-  }
-  renderUploadResults();
+  await syncEventsFromServer({ reason: "ai-batch" });
+  notifyEventDataChanged("ai-result");
 }
 
 function renderAiBatch(status = state.aiBatchStatus) {
@@ -611,7 +618,7 @@ function renderAiBatch(status = state.aiBatchStatus) {
   const progress = $("#ai-batch-progress");
   if (!button || !summary || !progress) return;
 
-  const uploadedTotal = state.events.filter((event) => !isReviewEvent(event)).length;
+  const uploadedTotal = selectedAiBatchEvents().length;
   const total = Number(status?.total ?? uploadedTotal);
   const complete = Number(status?.complete || 0);
   const queued = Number(status?.queued || 0);
@@ -620,6 +627,7 @@ function renderAiBatch(status = state.aiBatchStatus) {
   const remaining = Number(status?.remaining ?? Math.max(0, total - complete));
   const speciesPending = Number(status?.speciesPending || 0);
   const active = Boolean(status?.active);
+  const globalActive = Boolean(status?.globalActive);
   const paused = Boolean(status?.paused);
   const pauseButton = $("#pause-ai-batch-button");
   const resetButton = $("#reset-ai-workspace-button");
@@ -634,7 +642,7 @@ function renderAiBatch(status = state.aiBatchStatus) {
   $("#upload-empty").textContent = Number(status?.emptyTrigger || 0);
   $("#upload-needs-species").textContent = Number(status?.needsSpecies || 0);
   summary.textContent = `已完成 ${complete} / ${total} · 執行中 ${running} · 等待 ${queued} · 失敗 ${failed}`;
-  button.disabled = !state.config?.aiRuntime?.ready || active || remaining === 0;
+  button.disabled = !state.config?.aiRuntime?.ready || globalActive || !state.aiBatchId || remaining === 0;
   button.textContent = active && paused
     ? `批次已暫停 ${complete} / ${total}`
     : active
@@ -647,9 +655,12 @@ function renderAiBatch(status = state.aiBatchStatus) {
   pauseButton.disabled = !active;
   resetButton.disabled = total === 0;
   clearButton.disabled = total === 0;
+  $("#ai-batch-select").disabled = !state.aiBatchId || globalActive;
   pauseButton.textContent = paused ? "繼續批次辨識" : "完成目前這組後暫停";
-  pill.textContent = paused ? "已暫停" : (active ? "辨識中" : (remaining ? "等待啟動" : "全部完成"));
-  pill.dataset.status = paused ? "PAUSED" : (active ? "AI_RUNNING" : (remaining ? "AI_PENDING" : "AI_COMPLETE"));
+  pill.textContent = paused && active
+    ? "已暫停"
+    : (active ? "辨識中" : (globalActive ? "另一批次辨識中" : (remaining ? "等待啟動" : "全部完成")));
+  pill.dataset.status = paused && active ? "PAUSED" : (active ? "AI_RUNNING" : (remaining ? "AI_PENDING" : "AI_COMPLETE"));
   current.textContent = paused
     ? "佇列已暫停；按「繼續批次辨識」接續。"
     : (status?.currentEventId ? `目前處理：${status.currentEventId}` : (active ? "正在準備下一組…" : "尚未啟動批次工作"));
@@ -711,6 +722,7 @@ function renderAiPerformance(status) {
 
 function aiResultCategory(event) {
   if (event.AIStatus !== "AI_COMPLETE") return "pending";
+  if (event.AIRepeatDetection === "yes") return "repeat_detection";
   const labels = new Set(String(event.AIEventLabels || "").split(";").filter(Boolean));
   if (labels.has("animal")) return "needs_species";
   if (labels.has("person") || labels.has("vehicle")) return "other_nonempty";
@@ -722,8 +734,20 @@ function aiResultLabel(event) {
   if (event.AIStatus === "FAILED") return "辨識失敗";
   if (category === "pending") return event.AIStatus === "AI_RUNNING" ? "辨識中" : "尚未辨識";
   if (category === "empty") return "空觸發";
+  if (category === "repeat_detection") return "疑似固定背景誤判（待確認）";
   if (category === "other_nonempty") return "非空觸發（人／車輛）";
   return event.AISpecies ? `動物 · ${event.AISpecies}` : "動物 · 物種待追加辨識";
+}
+
+function humanResultLabel(event) {
+  const labelNames = new Map([...DECISIONS, ["mixed", "混合事件"]]);
+  const labels = String(event.HumanLabels || event.FinalDecision || "").split(";").filter(Boolean);
+  return labels.length ? labels.map((label) => labelNames.get(label) || label).join("、") : "尚未覆核";
+}
+
+function humanReviewStatusLabel(event) {
+  if (isReviewed(event)) return `已覆核 · ${event.ReviewStatus || "人工完成"}`;
+  return event.ReviewStatus ? `尚未完成 · ${event.ReviewStatus}` : "尚未覆核";
 }
 
 function renderUploadResults() {
@@ -736,12 +760,14 @@ function renderUploadResults() {
   const counts = {
     all: batch.length,
     empty: batch.filter((event) => aiResultCategory(event) === "empty").length,
+    repeat_detection: batch.filter((event) => aiResultCategory(event) === "repeat_detection").length,
     needs_species: batch.filter((event) => aiResultCategory(event) === "needs_species").length,
     other_nonempty: batch.filter((event) => aiResultCategory(event) === "other_nonempty").length,
     pending: batch.filter((event) => aiResultCategory(event) === "pending").length,
   };
   $("#result-count-all").textContent = counts.all;
   $("#result-count-empty").textContent = counts.empty;
+  $("#result-count-repeat").textContent = counts.repeat_detection;
   $("#result-count-species").textContent = counts.needs_species;
   $("#result-count-other").textContent = counts.other_nonempty;
   $("#result-count-pending").textContent = counts.pending;
@@ -750,7 +776,7 @@ function renderUploadResults() {
   }
   const completed = batch.length - counts.pending;
   $("#upload-results-meta").textContent = batch.length
-    ? `此匯入批次共 ${batch.length} 組 · AI 已完成 ${completed} 組 · 空觸發 ${counts.empty} 組 · 動物事件 ${counts.needs_species} 組`
+    ? `此匯入批次共 ${batch.length} 組 · AI 已完成 ${completed} 組 · 空觸發 ${counts.empty} 組 · 疑似背景誤判 ${counts.repeat_detection} 組 · 動物事件 ${counts.needs_species} 組`
     : "尚未匯入事件。完成上傳後，辨識結果會依批次顯示在這裡。";
 
   const speciesSummary = $("#species-result-summary");
@@ -824,7 +850,7 @@ function renderUploadResults() {
     result.className = `compact-result-status category-${aiResultCategory(event)}`;
     result.textContent = aiResultLabel(event);
     const meta = document.createElement("small");
-    meta.textContent = `${event.EventTime || "無拍攝時間"}${event.AIConfidence ? ` · 偵測 ${event.AIConfidence}` : ""}${event.AISpeciesConfidence ? ` · 物種 ${event.AISpeciesConfidence}` : ""}`;
+    meta.textContent = `${event.EventTime || "無拍攝時間"}${event.AIConfidence ? ` · 偵測 ${event.AIConfidence}` : ""}${event.AISpeciesConfidence ? ` · 物種 ${event.AISpeciesConfidence}` : ""} · ${isReviewed(event) ? "人工已覆核" : "人工待覆核"}`;
     copy.append(title, result, meta);
 
     const detail = document.createElement("span");
@@ -850,6 +876,10 @@ function openAiResultDetail(event) {
     ["物種中文候選", event.AISpecies || "—"],
     ["物種信心", event.AISpeciesConfidence || "—"],
     ["信心", event.AIConfidence || "—"],
+    ["固定背景檢查", event.AIRepeatDetection === "yes" ? "疑似重複誤判，請人工確認" : "未命中重複熱點"],
+    ["重複證據", event.AIRepeatDetectionSupport || "—"],
+    ["人工覆核狀態", humanReviewStatusLabel(event)],
+    ["人工最終結果", humanResultLabel(event)],
   ]) {
     const item = document.createElement("div");
     const name = document.createElement("span");
@@ -869,7 +899,7 @@ function openAiResultDetail(event) {
       image.src = event.media[key];
       image.alt = `${event.EventID} ${key}`;
       image.loading = "eager";
-      image.addEventListener("click", () => openImage(event.media[key], event[key]));
+      image.addEventListener("click", () => openImage(event, key));
       figure.append(image);
     }
     const caption = document.createElement("figcaption");
@@ -879,11 +909,7 @@ function openAiResultDetail(event) {
   }
   const videoFigure = document.createElement("figure");
   if (event.media.Video) {
-    const video = document.createElement("video");
-    video.src = event.media.Video;
-    video.controls = true;
-    video.preload = "metadata";
-    videoFigure.append(video);
+    videoFigure.append(createVideoPlayer(event));
   } else {
     const missing = document.createElement("div");
     missing.className = "ai-result-video-missing";
@@ -935,6 +961,10 @@ async function pollAiBatch() {
 
 async function startAiBatch() {
   if (state.aiBatchActive) return;
+  if (!state.aiBatchId) {
+    showToast("請先選擇要辨識的匯入批次。", true);
+    return;
+  }
   if (state.dirty) {
     showToast("請先儲存目前的人工標註，再啟動全部 AI 辨識。", true);
     return;
@@ -949,7 +979,7 @@ async function startAiBatch() {
     const response = await fetch(serviceUrl("/api/ai/batch"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode, identifySpecies }),
+      body: JSON.stringify({ mode, identifySpecies, deploymentId: state.aiBatchId }),
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "無法建立批次 AI 工作。");
@@ -974,7 +1004,7 @@ async function toggleAiBatchPause() {
     const response = await fetch(serviceUrl("/api/ai/batch/pause"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ paused }),
+      body: JSON.stringify({ paused, deploymentId: state.aiBatchId }),
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "無法變更批次辨識狀態。");
@@ -999,17 +1029,20 @@ async function refreshAiBatchStatus() {
 }
 
 async function resetAiWorkspace() {
-  const total = Number(state.aiBatchStatus?.total || 0);
-  if (!total) return;
+  const total = selectedAiBatchEvents().length;
+  if (!state.aiBatchId || !total) return;
+  const deploymentId = state.aiBatchId;
+  const batchLabel = $("#ai-batch-select").selectedOptions[0]?.textContent || deploymentId;
   const activeNote = state.aiBatchStatus?.active ? "目前執行中的工作也會取消，完成後不會寫入結果。\n\n" : "";
-  if (!window.confirm(`${activeNote}要重置 ${total} 組上傳事件的 AI 結果嗎？\n照片與事件不會刪除，原本 154 組人工覆核資料也不受影響。`)) return;
+  if (!window.confirm(`${activeNote}要重置「${batchLabel}」的 ${total} 組 AI 結果嗎？\n照片、事件與人工覆核答案不會刪除。`)) return;
+  if (!window.confirm(`再次確認：確定清除「${batchLabel}」目前的 AI 判定嗎？\n\n此批次之後需要重新執行 AI 辨識。`)) return;
   const button = $("#reset-ai-workspace-button");
   button.disabled = true;
   try {
     const response = await fetch(serviceUrl("/api/ai/reset"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ confirm: "RESET_AI_WORKSPACE" }),
+      body: JSON.stringify({ confirm: "RESET_AI_BATCH", deploymentId }),
     });
     const payload = await responseJson(response, "無法重置 AI 工作區。");
     clearTimeout(state.aiBatchPollTimer);
@@ -1017,7 +1050,7 @@ async function resetAiWorkspace() {
     state.aiBatchActive = false;
     await reloadEventCollection();
     renderAiBatch(payload.status);
-    showToast(`已重置 ${payload.reset} 組上傳事件的 AI 結果。`);
+    showToast(`已重置「${batchLabel}」共 ${payload.reset} 組事件的 AI 結果。`);
   } catch (error) {
     showToast(error.message, true);
     renderAiBatch(state.aiBatchStatus);
@@ -1025,25 +1058,27 @@ async function resetAiWorkspace() {
 }
 
 async function clearUploadWorkspace() {
-  const total = Number(state.aiBatchStatus?.total || 0);
-  if (!total) return;
-  if (!window.confirm(`要清除 AI 工作區中的 ${total} 組上傳事件與工作副本嗎？\n\n此操作無法復原，但原始來源資料夾及 154 組人工覆核資料不會被修改。`)) return;
+  const total = selectedAiBatchEvents().length;
+  if (!state.aiBatchId || !total) return;
+  const deploymentId = state.aiBatchId;
+  const batchLabel = $("#ai-batch-select").selectedOptions[0]?.textContent || deploymentId;
+  if (!window.confirm(`要清除「${batchLabel}」的 ${total} 組上傳事件與工作副本嗎？\n\n其他批次、原始來源資料夾及人工覆核基準資料不受影響。`)) return;
+  if (!window.confirm(`再次確認：確定永久刪除「${batchLabel}」嗎？\n\n此操作無法復原。`)) return;
   const button = $("#clear-upload-workspace-button");
   button.disabled = true;
   try {
     const response = await fetch(serviceUrl("/api/workspace/clear"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ confirm: "CLEAR_UPLOAD_WORKSPACE" }),
+      body: JSON.stringify({ confirm: "CLEAR_UPLOAD_BATCH", deploymentId }),
     });
     const payload = await responseJson(response, "無法清除上傳工作區。");
     clearTimeout(state.aiBatchPollTimer);
-    state.aiBatchStatus = payload.status;
     state.aiBatchActive = false;
     sessionStorage.removeItem("cameraTrapLastImport");
     await reloadEventCollection();
-    renderAiBatch(payload.status);
-    showToast(`已清除 ${payload.removed} 組上傳事件；現在可上傳新的資料夾。`);
+    await refreshAiBatchStatus();
+    showToast(`已清除「${batchLabel}」共 ${payload.removed} 組事件；其他批次仍保留。`);
   } catch (error) {
     showToast(error.message, true);
     renderAiBatch(state.aiBatchStatus);
@@ -1118,6 +1153,35 @@ function renderVideo(event) {
   $("#unlock-video-button").disabled = false;
 }
 
+function createVideoPlayer(event) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "video-preview-player";
+  const video = document.createElement("video");
+  video.controls = true;
+  video.preload = "metadata";
+  video.src = event.videoPreview || event.media.Video;
+  const status = document.createElement("p");
+  status.className = "video-preview-status";
+  status.textContent = event.videoPreview
+    ? "正在準備瀏覽器相容預覽；首次開啟 AVI 可能需要數秒。"
+    : "正在載入影片…";
+  video.addEventListener("loadedmetadata", () => {
+    status.textContent = "影片已可播放。";
+    status.classList.add("ready");
+  });
+  video.addEventListener("error", () => {
+    status.textContent = "無法建立影片預覽；請使用下方連結開啟原始檔。";
+    status.classList.add("error");
+  });
+  const original = document.createElement("a");
+  original.href = event.media.Video;
+  original.target = "_blank";
+  original.rel = "noopener";
+  original.textContent = `下載／另開原始影片：${event.Video}`;
+  wrapper.append(video, status, original);
+  return wrapper;
+}
+
 function unlockVideo() {
   const event = currentEvent();
   if (!event || state.videoUnlocked) return;
@@ -1130,11 +1194,7 @@ function unlockVideo() {
 
   const mediaColumn = document.createElement("div");
   if (event.media.Video) {
-    const video = document.createElement("video");
-    video.controls = true;
-    video.preload = "metadata";
-    video.src = event.media.Video;
-    mediaColumn.append(video);
+    mediaColumn.append(createVideoPlayer(event));
   } else {
     mediaColumn.textContent = "此事件沒有影片檔。";
   }
@@ -1158,16 +1218,8 @@ function unlockVideo() {
   adds.value = event.VideoAddsAnimal || "";
   addsLabel.append(adds);
   const note = document.createElement("p");
-  note.textContent = "若瀏覽器無法播放 AVI，可另開原始影片；判讀值仍會存入同一事件。";
+  note.textContent = "AVI 會在首次開啟時建立靜音的 WebM 判讀預覽；原始影片不會修改。";
   controls.append(decisionLabel, addsLabel, note);
-  if (event.media.Video) {
-    const link = document.createElement("a");
-    link.href = event.media.Video;
-    link.target = "_blank";
-    link.rel = "noopener";
-    link.textContent = `另開原始影片：${event.Video}`;
-    controls.append(link);
-  }
   for (const select of [decision, adds]) select.addEventListener("change", () => setDirty(true));
   content.append(mediaColumn, controls);
 }
@@ -1221,7 +1273,7 @@ function renderEmptyReviewState() {
   setDirty(false);
 }
 
-function renderCurrentEvent() {
+function renderCurrentEvent({ scrollToTop = true } = {}) {
   const event = currentEvent();
   if (!event) return renderEmptyReviewState();
   $("#review-view").classList.remove("empty-review");
@@ -1241,7 +1293,7 @@ function renderCurrentEvent() {
   setFormValues(event);
   renderEventList();
   setDirty(false);
-  window.scrollTo({ top: 0, behavior: "smooth" });
+  if (scrollToTop) window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 function selectEvent(eventId, force = false) {
@@ -1314,7 +1366,9 @@ async function saveCurrent(goNext = false) {
     recalculateStatus();
     renderStatus();
     applyFilter();
+    renderUploadResults();
     setDirty(false);
+    notifyEventDataChanged("human-review");
     showToast(`${result.event.EventID} 已儲存`);
     if (goNext) {
       const filteredIndex = state.filtered.findIndex((event) => event.EventID === result.event.EventID);
@@ -1329,10 +1383,49 @@ async function saveCurrent(goNext = false) {
   }
 }
 
-function openImage(source, caption) {
-  $("#dialog-image").src = source;
-  $("#dialog-caption").textContent = caption;
+function updateImageDialog() {
+  const item = state.imageGallery[state.imageGalleryIndex];
+  if (!item) return;
+  $("#dialog-image").src = item.source;
+  $("#dialog-image").alt = `${item.eventId} ${item.key}`;
+  $("#dialog-caption").textContent = `${item.key} · ${item.caption}`;
+  $("#dialog-position").textContent = `${state.imageGalleryIndex + 1} / ${state.imageGallery.length}`;
+  $("#dialog-previous").disabled = state.imageGalleryIndex === 0;
+  $("#dialog-next").disabled = state.imageGalleryIndex >= state.imageGallery.length - 1;
+}
+
+function openImage(event, selectedKey) {
+  state.imageGallery = ["Photo1", "Photo2", "Photo3"]
+    .filter((key) => event.media[key])
+    .map((key) => ({ key, source: event.media[key], caption: event[key], eventId: event.EventID }));
+  state.imageGalleryIndex = Math.max(0, state.imageGallery.findIndex((item) => item.key === selectedKey));
+  updateImageDialog();
   openModalDialog($("#image-dialog"));
+}
+
+function navigateImage(offset) {
+  const nextIndex = state.imageGalleryIndex + offset;
+  if (nextIndex < 0 || nextIndex >= state.imageGallery.length) return;
+  state.imageGalleryIndex = nextIndex;
+  updateImageDialog();
+}
+
+function closeImageDialog() {
+  closeModalDialog($("#image-dialog"));
+  $("#dialog-image").removeAttribute("src");
+  state.imageGallery = [];
+  state.imageGalleryIndex = 0;
+}
+
+function handleImageDialogKeydown(event) {
+  if (!$("#image-dialog").open) return;
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    navigateImage(-1);
+  } else if (event.key === "ArrowRight") {
+    event.preventDefault();
+    navigateImage(1);
+  }
 }
 
 const ACCEPTED_MEDIA_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "avi", "mp4", "mov"]);
@@ -1497,7 +1590,7 @@ async function reloadEventCollection(preferredId = "") {
   const payload = await responseJson(response, "無法重新載入事件成果。");
   state.events = payload.events.map(normalizeEvent);
   const preferredBatchId = state.events.find((event) => event.EventID === preferredId && event.SourceType === "web_upload")?.DeploymentID || "";
-  syncCollectionSelectors(preferredBatchId);
+  syncCollectionSelectors(preferredBatchId, preferredBatchId);
   recalculateStatus();
   state.currentId = state.events.some((event) => event.EventID === preferredId)
     ? preferredId
@@ -1507,6 +1600,65 @@ async function reloadEventCollection(preferredId = "") {
   if (state.currentId) renderCurrentEvent();
   else renderEmptyReviewState();
   renderUploadResults();
+}
+
+function notifyEventDataChanged(kind) {
+  const message = { kind, at: Date.now() };
+  if (eventSyncChannel) eventSyncChannel.postMessage(message);
+  else localStorage.setItem(EVENT_SYNC_CHANNEL, JSON.stringify(message));
+}
+
+async function syncEventsFromServer({ reason = "manual", includeBatch = true } = {}) {
+  if (!state.serverAvailable) return false;
+  if (eventSyncPromise) return eventSyncPromise;
+  eventSyncPromise = (async () => {
+    const previousCurrentId = state.currentId;
+    const previousUploadBatchId = state.uploadBatchId;
+    const previousAiBatchId = state.aiBatchId;
+    const wasDirty = state.dirty;
+    const requests = [fetch(serviceUrl("/api/events"))];
+    if (includeBatch) requests.push(fetch(aiBatchUrl()));
+    const [eventsResponse, batchResponse] = await Promise.all(requests);
+    const eventPayload = await responseJson(eventsResponse, "無法同步 AI 與人工覆核資料。");
+    state.events = eventPayload.events.map(normalizeEvent);
+    syncCollectionSelectors(previousUploadBatchId, previousAiBatchId);
+    state.currentId = state.events.some((event) => event.EventID === previousCurrentId)
+      ? previousCurrentId
+      : (reviewEvents()[0]?.EventID || state.events[0]?.EventID || null);
+    if (batchResponse) {
+      const batchPayload = await responseJson(batchResponse, "無法同步 AI 批次狀態。");
+      state.aiBatchStatus = batchPayload.status;
+      state.aiBatchActive = Boolean(batchPayload.status?.active);
+      renderAiBatch(state.aiBatchStatus);
+    }
+    recalculateStatus();
+    renderStatus();
+    applyFilter();
+    if (state.currentView === "review") {
+      if (!currentEvent()) renderEmptyReviewState();
+      else if (wasDirty) {
+        renderAiResult(currentEvent());
+        renderMetadata(currentEvent());
+        renderEventList();
+        setDirty(true);
+      } else renderCurrentEvent({ scrollToTop: false });
+    }
+    renderUploadResults();
+    lastEventSyncAt = Date.now();
+    return true;
+  })().catch((error) => {
+    if (reason !== "focus" && reason !== "visibility") showToast(error.message, true);
+    throw error;
+  }).finally(() => {
+    eventSyncPromise = null;
+  });
+  return eventSyncPromise;
+}
+
+function requestEventSync(reason, force = false) {
+  if (!state.serverAvailable || state.saving) return;
+  if (!force && Date.now() - lastEventSyncAt < 1500) return;
+  void syncEventsFromServer({ reason }).catch(() => {});
 }
 
 async function uploadImportJob() {
@@ -1662,6 +1814,10 @@ function initializeControls() {
     state.uploadResultLimit = 24;
     renderUploadResults();
   });
+  $("#ai-batch-select").addEventListener("change", async (event) => {
+    state.aiBatchId = event.target.value;
+    await refreshAiBatchStatus().catch((error) => showToast(error.message, true));
+  });
   $("#upload-result-tabs").addEventListener("click", (event) => {
     const button = event.target.closest("[data-result-filter]");
     if (!button) return;
@@ -1683,9 +1839,12 @@ function initializeControls() {
     state.uploadResultLimit += 24;
     renderUploadResults();
   });
-  $("#close-dialog").addEventListener("click", () => closeModalDialog($("#image-dialog")));
+  $("#close-dialog").addEventListener("click", closeImageDialog);
+  $("#dialog-previous").addEventListener("click", () => navigateImage(-1));
+  $("#dialog-next").addEventListener("click", () => navigateImage(1));
+  document.addEventListener("keydown", handleImageDialogKeydown);
   $("#image-dialog").addEventListener("click", (event) => {
-    if (event.target === $("#image-dialog")) closeModalDialog($("#image-dialog"));
+    if (event.target === $("#image-dialog")) closeImageDialog();
   });
   $("#close-ai-result-dialog").addEventListener("click", closeAiResultDetail);
   $("#ai-result-dialog").addEventListener("click", (event) => {
@@ -1755,6 +1914,14 @@ function initializeControls() {
   });
   showView(window.location.hash === "#review" ? "review" : "upload", false);
   window.addEventListener("hashchange", () => showView(window.location.hash === "#review" ? "review" : "upload", false));
+  if (eventSyncChannel) eventSyncChannel.addEventListener("message", () => requestEventSync("cross-tab", true));
+  else window.addEventListener("storage", (event) => {
+    if (event.key === EVENT_SYNC_CHANNEL) requestEventSync("cross-tab", true);
+  });
+  window.addEventListener("focus", () => requestEventSync("focus"));
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") requestEventSync("visibility");
+  });
 
   window.addEventListener("beforeunload", (event) => {
     if (state.dirty) event.preventDefault();
@@ -1776,19 +1943,20 @@ async function start() {
   initializePwa();
   $("#export-link").href = serviceUrl("/api/export.csv");
   try {
-    const [configResponse, eventsResponse, taxonomyResponse, batchResponse] = await Promise.all([
+    const [configResponse, eventsResponse, taxonomyResponse] = await Promise.all([
       fetch(serviceUrl("/api/config")),
       fetch(serviceUrl("/api/events")),
       fetch(serviceUrl("/api/taxonomy")),
-      fetch(aiBatchUrl()),
     ]);
-    if (!configResponse.ok || !eventsResponse.ok || !taxonomyResponse.ok || !batchResponse.ok) throw new Error("無法讀取專案資料。");
+    if (!configResponse.ok || !eventsResponse.ok || !taxonomyResponse.ok) throw new Error("無法讀取專案資料。");
     state.config = await configResponse.json();
     const eventPayload = await eventsResponse.json();
-    const batchPayload = await batchResponse.json();
     state.events = eventPayload.events.map(normalizeEvent);
     syncCollectionSelectors();
     recalculateStatus();
+    const batchResponse = await fetch(aiBatchUrl());
+    if (!batchResponse.ok) throw new Error("無法讀取 AI 批次資料。");
+    const batchPayload = await batchResponse.json();
     state.aiBatchStatus = batchPayload.status;
     state.aiBatchActive = Boolean(batchPayload.status?.active);
     state.taxonomy = (await taxonomyResponse.json()).taxonomy;

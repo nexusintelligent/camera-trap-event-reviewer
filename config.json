@@ -22,6 +22,7 @@
     "jobsRoot": "D:\\CameraTrap_Gold_v1\\04_annotations\\ai_jobs_v2",
     "country": "TWN",
     "detectorModel": "MDv1000-redwood",
+    "detectorModelPath": "local-data\\model-cache\\megadetector\\md_v1000.0.0-redwood.pt",
     "megadetectorVersion": "10.0.24",
     "speciesnetVersion": "5.0.5",
     "detectionThresholdForClassification": 0.15,

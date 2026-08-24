@@ -33,6 +33,11 @@ config.ai.modelCacheRoot = path.resolve(ROOT, expandEnvironmentVariables(
 config.ai.jobsRoot = path.resolve(process.env.CAMTRAP_AI_JOBS_ROOT || config.ai.jobsRoot || path.join(ROOT, "ai_jobs"));
 config.ai.country = process.env.CAMTRAP_AI_COUNTRY || config.ai.country || "";
 config.ai.detectorModel = process.env.CAMTRAP_AI_DETECTOR_MODEL || config.ai.detectorModel || "MDv1000-redwood";
+config.ai.detectorModelPath = path.resolve(ROOT, expandEnvironmentVariables(
+  process.env.CAMTRAP_AI_DETECTOR_MODEL_FILE
+    || config.ai.detectorModelPath
+    || path.join(config.ai.modelCacheRoot, "megadetector", "md_v1000.0.0-redwood.pt"),
+));
 config.ai.megadetectorVersion ||= "unknown";
 config.ai.speciesnetVersion ||= "unknown";
 config.ai.detectionThresholdForClassification = Number(config.ai.detectionThresholdForClassification ?? 0.15);
@@ -56,6 +61,13 @@ config.webUploads.maxFilesPerImport = Number(config.webUploads.maxFilesPerImport
 config.webUploads.maxFileBytes = Number(config.webUploads.maxFileBytes ?? 4_294_967_296);
 config.webUploads.eventGapSeconds = Number(config.webUploads.eventGapSeconds ?? 120);
 const AI_TRIAGE_VERSION = `triage-v1.2@${config.ai.detectionThresholdForClassification}`;
+const REPEAT_DETECTION_VERSION = "repeat-detection-v1.0";
+const REPEAT_DETECTION_IOU = 0.80;
+// This is a review flag, not an automatic empty label.  Three independent
+// events across multiple days is enough to surface a fixed-camera hotspot
+// without discarding the original animal detection.
+const REPEAT_DETECTION_MIN_EVENTS = 3;
+const REPEAT_DETECTION_MIN_DAYS = 2;
 
 const configuredWorkingCsv = path.resolve(ROOT, config.workingCsv);
 const configuredAuditLog = path.resolve(ROOT, config.auditLog);
@@ -113,9 +125,11 @@ await prepareWritableAiJobsStorage();
 config.ai.cacheRoot = path.join(config.ai.jobsRoot, "cache");
 config.ai.detectionCacheRoot = path.join(config.ai.cacheRoot, "detections");
 config.ai.thumbnailCacheRoot = path.join(config.ai.cacheRoot, "thumbnails");
+config.ai.videoPreviewCacheRoot = path.join(config.ai.cacheRoot, "video-previews");
 config.ai.performanceFile = path.join(config.ai.cacheRoot, "last-fast-performance.json");
 await mkdir(config.ai.detectionCacheRoot, { recursive: true });
 await mkdir(config.ai.thumbnailCacheRoot, { recursive: true });
+await mkdir(config.ai.videoPreviewCacheRoot, { recursive: true });
 
 async function prepareWritableWebUploadStorage() {
   const configuredRoot = path.resolve(config.webUploads.root);
@@ -155,7 +169,7 @@ const IMMUTABLE_FIELDS = [
 ];
 const AI_FIELDS = [
   "AIStatus", "AIEventLabels", "AISpecies", "AISpeciesConfidence", "AIConfidence", "AIModelName",
-  "AIModelVersion", "AIProcessedAt", "AIError",
+  "AIModelVersion", "AIProcessedAt", "AIError", "AIRepeatDetection", "AIRepeatDetectionSupport",
 ];
 const EDITABLE_FIELDS = [
   "PhotoOnlyDecision", "VideoDecision", "VideoAddsAnimal", "FinalDecision", "VisibleClass",
@@ -201,11 +215,13 @@ const MIME_TYPES = {
   ".png": "image/png",
   ".svg": "image/svg+xml",
   ".webp": "image/webp",
+  ".webm": "video/webm",
   ".webmanifest": "application/manifest+json; charset=utf-8",
 };
 
 let events = [];
 let taxonomy = [];
+const videoPreviewPromises = new Map();
 let mediaPaths = new Map();
 let saveQueue = Promise.resolve();
 let aiRunQueue = Promise.resolve();
@@ -218,7 +234,7 @@ const importSessions = new Map();
 const fastAiWorker = new PersistentMegaDetectorWorker({
   pythonPath: config.ai.pythonPath,
   scriptPath: path.join(ROOT, "scripts", "megadetector_worker.py"),
-  model: config.ai.detectorModel,
+  model: config.ai.detectorModelPath,
   threshold: config.ai.detectionThresholdForOutput,
   batchSize: config.ai.workerBatchSize,
   cwd: ROOT,
@@ -260,8 +276,17 @@ function isWebWorkspaceEvent(event) {
   return event?._source === "web" || event?.SourceType === "web_upload";
 }
 
-function webWorkspaceEvents() {
-  return events.filter(isWebWorkspaceEvent);
+function webWorkspaceEvents(deploymentId = "") {
+  const workspace = events.filter(isWebWorkspaceEvent);
+  return deploymentId ? workspace.filter((event) => event.DeploymentID === deploymentId) : workspace;
+}
+
+function requireWebWorkspaceBatch(deploymentId) {
+  const normalized = String(deploymentId || "").trim();
+  if (!normalized) throw requestError(400, "請先選擇要操作的匯入批次。");
+  const workspace = webWorkspaceEvents(normalized);
+  if (!workspace.length) throw requestError(404, "找不到指定的匯入批次。");
+  return { deploymentId: normalized, workspace };
 }
 
 function isAllowedBrowserOrigin(origin) {
@@ -324,6 +349,7 @@ function publicEvent(event) {
       return [field, thumbnail && existsSync(thumbnail) ? `/thumbnail/${sha256}.jpg` : ""];
     }),
   );
+  result.videoPreview = event.Video ? `/video-preview/${encodeURIComponent(event.Video)}` : "";
   result.filenameHint = [event.Photo1, event.Photo2, event.Photo3, event.Video]
     .map((name) => extractFilenameHint(name))
     .find(Boolean) || "";
@@ -851,23 +877,10 @@ async function serveStatic(request, response, pathname) {
   }
 }
 
-async function serveMedia(request, response, encodedName) {
-  let filename;
-  try {
-    filename = decodeURIComponent(encodedName);
-  } catch {
-    textResponse(response, 400, "Bad media path");
-    return;
-  }
-  const resolved = mediaPaths.get(filename);
-  if (!resolved) {
-    textResponse(response, 404, "Unknown media");
-    return;
-  }
+async function serveRangedFile(request, response, resolved, contentType, cacheControl = "private, max-age=300") {
   try {
     const info = await stat(resolved);
     const range = request.headers.range;
-    const contentType = MIME_TYPES[path.extname(resolved).toLowerCase()] || "application/octet-stream";
     if (range) {
       const match = /^bytes=(\d*)-(\d*)$/.exec(range);
       if (!match) {
@@ -884,19 +897,84 @@ async function serveMedia(request, response, encodedName) {
       }
       response.writeHead(206, {
         "Accept-Ranges": "bytes", "Content-Range": `bytes ${start}-${end}/${info.size}`,
-        "Content-Length": end - start + 1, "Content-Type": contentType, "Cache-Control": "private, max-age=300",
+        "Content-Length": end - start + 1, "Content-Type": contentType, "Cache-Control": cacheControl,
       });
-      createReadStream(resolved, { start, end }).pipe(response);
+      if (request.method === "HEAD") response.end();
+      else createReadStream(resolved, { start, end }).pipe(response);
       return;
     }
     response.writeHead(200, {
       "Accept-Ranges": "bytes", "Content-Length": info.size, "Content-Type": contentType,
-      "Cache-Control": "private, max-age=300",
+      "Cache-Control": cacheControl,
     });
-    createReadStream(resolved).pipe(response);
+    if (request.method === "HEAD") response.end();
+    else createReadStream(resolved).pipe(response);
   } catch (error) {
     textResponse(response, error.code === "ENOENT" ? 404 : 500, error.code === "ENOENT" ? "Missing media" : "Media error");
   }
+}
+
+async function serveMedia(request, response, encodedName) {
+  let filename;
+  try {
+    filename = decodeURIComponent(encodedName);
+  } catch {
+    textResponse(response, 400, "Bad media path");
+    return;
+  }
+  const resolved = mediaPaths.get(filename);
+  if (!resolved) {
+    textResponse(response, 404, "Unknown media");
+    return;
+  }
+  const contentType = MIME_TYPES[path.extname(resolved).toLowerCase()] || "application/octet-stream";
+  await serveRangedFile(request, response, resolved, contentType);
+}
+
+async function videoPreviewKey(filename, resolved) {
+  const event = events.find((candidate) => candidate.Video === filename);
+  const manifestSha = event ? mediaShaForToken(event, filename) : "";
+  if (manifestSha) return manifestSha;
+  const info = await stat(resolved);
+  return createHash("sha256").update(`${resolved}|${info.size}|${info.mtimeMs}`).digest("hex");
+}
+
+async function ensureVideoPreview(filename, resolved) {
+  const extension = path.extname(resolved).toLowerCase();
+  if (extension !== ".avi") return { resolved, contentType: MIME_TYPES[extension] || "application/octet-stream" };
+  if (!existsSync(config.ai.pythonPath)) throw Object.assign(new Error("找不到影片預覽所需的本機 Python 環境。"), { statusCode: 503 });
+  const cacheKey = await videoPreviewKey(filename, resolved);
+  const destination = path.join(config.ai.videoPreviewCacheRoot, `${cacheKey}.webm`);
+  if (existsSync(destination)) return { resolved: destination, contentType: "video/webm" };
+  if (!videoPreviewPromises.has(cacheKey)) {
+    const promise = (async () => {
+      const script = path.join(ROOT, "scripts", "transcode-video-preview.py");
+      const result = await runProcess(config.ai.pythonPath, [script, resolved, destination, "960", "12"]);
+      if (result.code !== 0 || !existsSync(destination)) {
+        throw Object.assign(new Error((result.stderr || result.stdout || "影片預覽轉換失敗").trim().slice(-2000)), { statusCode: 500 });
+      }
+    })().finally(() => videoPreviewPromises.delete(cacheKey));
+    videoPreviewPromises.set(cacheKey, promise);
+  }
+  await videoPreviewPromises.get(cacheKey);
+  return { resolved: destination, contentType: "video/webm" };
+}
+
+async function serveVideoPreview(request, response, encodedName) {
+  let filename;
+  try {
+    filename = decodeURIComponent(encodedName);
+  } catch {
+    textResponse(response, 400, "Bad video path");
+    return;
+  }
+  const resolved = mediaPaths.get(filename);
+  if (!resolved || !VIDEO_EXTENSIONS.has(path.extname(resolved).toLowerCase())) {
+    textResponse(response, 404, "Unknown video");
+    return;
+  }
+  const preview = await ensureVideoPreview(filename, resolved);
+  await serveRangedFile(request, response, preview.resolved, preview.contentType, "private, max-age=31536000, immutable");
 }
 
 async function serveThumbnail(response, encodedFilename) {
@@ -988,12 +1066,22 @@ async function probeAiRuntime(force = false) {
     ]);
     if (result.code !== 0) throw new Error(result.stderr || result.stdout || `exit ${result.code}`);
     const versions = JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1));
+    const detectorModelReady = existsSync(config.ai.detectorModelPath)
+      && (await stat(config.ai.detectorModelPath)).size >= 50_000_000;
     aiRuntimeStatus = {
-      ready: true,
-      status: "READY",
+      ready: detectorModelReady,
+      status: detectorModelReady ? "READY" : "MODEL_MISSING",
       message: "MegaDetector 與 SpeciesNet 已可使用。",
       pythonPath: config.ai.pythonPath,
       detectorModel: config.ai.detectorModel,
+      detectorModelPath: config.ai.detectorModelPath,
+      detectorModelReady,
+      message: detectorModelReady
+        ? "MegaDetector 與 SpeciesNet 已可使用。"
+        : "MegaDetector 權重尚未安裝完整；請重新執行「安裝AI辨識環境.cmd」。",
+      message: detectorModelReady
+        ? "MegaDetector \u8207 SpeciesNet \u5df2\u53ef\u4f7f\u7528\u3002"
+        : "MegaDetector \u6b0a\u91cd\u5c1a\u672a\u5b89\u88dd\u5b8c\u6574\uff1b\u8acb\u91cd\u65b0\u57f7\u884c\u300c\u5b89\u88ddAI\u8fa8\u8b58\u74b0\u5883.cmd\u300d\u3002",
       country: config.ai.country,
       versions: { megadetector: versions.megadetector, speciesnet: versions.speciesnet, torch: versions.torch },
       hardware: {
@@ -1034,6 +1122,19 @@ function publicAiJob(job) {
 
 function normalizedLabelSet(value) {
   return String(value || "").split(";").map((label) => label.trim()).filter(Boolean).sort().join(";");
+}
+
+function synchronizeHumanReviewStatus(event) {
+  const humanLabels = normalizedLabelSet(event.HumanLabels);
+  if (!humanLabels) return;
+  if (["double_checked", "adjudicated"].includes(event.ReviewStatus)) return;
+  if (humanLabels.split(";").includes("uncertain")) {
+    event.ReviewStatus = "UNCERTAIN";
+  } else if (event.AIEventLabels && humanLabels !== normalizedLabelSet(event.AIEventLabels)) {
+    event.ReviewStatus = "CONFLICT";
+  } else {
+    event.ReviewStatus = "HUMAN_CONFIRMED";
+  }
 }
 
 function detectionLabel(detection, categories) {
@@ -1194,6 +1295,10 @@ function applyAiSummaryToEvent(event, summary, { identifySpecies = false, mode =
   ].filter(Boolean).join("; ");
   event.AIProcessedAt = new Date().toISOString();
   event.AIError = summary.failures.join("; ");
+  if (mode === "fast") {
+    event.AIRepeatDetection = "";
+    event.AIRepeatDetectionSupport = "";
+  }
   if (event.HumanLabels && normalizedLabelSet(event.HumanLabels) !== normalizedLabelSet(event.AIEventLabels)) {
     event.ReviewStatus = "CONFLICT";
   } else if (event.HumanLabels && event.ReviewStatus === "CONFLICT") {
@@ -1341,6 +1446,187 @@ async function writeDetectionCache(item, result) {
   await rename(temporary, filename);
 }
 
+function detectionConfidence(detection) {
+  return Number(detection?.conf ?? detection?.score ?? 0);
+}
+
+function normalizedDetectionBox(detection) {
+  const box = detection?.bbox;
+  if (!Array.isArray(box) || box.length < 4) return null;
+  const values = box.slice(0, 4).map(Number);
+  if (values.some((value) => !Number.isFinite(value))) return null;
+  const [x, y, width, height] = values;
+  if (width <= 0 || height <= 0) return null;
+  return [x, y, width, height];
+}
+
+function detectionBoxIou(left, right) {
+  const intersectionLeft = Math.max(left[0], right[0]);
+  const intersectionTop = Math.max(left[1], right[1]);
+  const intersectionRight = Math.min(left[0] + left[2], right[0] + right[2]);
+  const intersectionBottom = Math.min(left[1] + left[3], right[1] + right[3]);
+  const intersection = Math.max(0, intersectionRight - intersectionLeft)
+    * Math.max(0, intersectionBottom - intersectionTop);
+  if (!intersection) return 0;
+  const union = left[2] * left[3] + right[2] * right[3] - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+
+function eventDayKey(event) {
+  const match = String(event.EventTime || "").match(/\d{4}-\d{2}-\d{2}/);
+  return match?.[0] || "unknown-day";
+}
+
+function eventCameraViewKey(event) {
+  const firstRelativePath = String(event.SourceRelativePaths || "").split(";").find(Boolean) || "";
+  const normalized = firstRelativePath.replaceAll("\\", "/");
+  const sourceDirectory = normalized.includes("/") ? normalized.slice(0, normalized.lastIndexOf("/")) : ".";
+  return `${event.DeploymentID}::${sourceDirectory}`;
+}
+
+function repeatDetectionRecords(entries, referencesByEvent, detectionsByCacheKey) {
+  const records = [];
+  for (const { event } of entries) {
+    const labels = String(event.AIEventLabels || "").split(";").filter(Boolean);
+    if (event.AIStatus !== "AI_COMPLETE" || labels.length !== 1 || labels[0] !== "animal") continue;
+    for (const item of referencesByEvent.get(event.EventID) || []) {
+      const result = detectionsByCacheKey.get(item.cacheKey);
+      for (const detection of result?.detections || []) {
+        if (detectionLabel(detection, { "1": "animal", "2": "person", "3": "vehicle" }) !== "animal") continue;
+        if (detectionConfidence(detection) < config.ai.detectionThresholdForClassification) continue;
+        const bbox = normalizedDetectionBox(detection);
+        if (!bbox) continue;
+        records.push({
+          deploymentId: event.DeploymentID,
+          viewId: eventCameraViewKey(event),
+          eventId: event.EventID,
+          day: eventDayKey(event),
+          bbox,
+          confidence: detectionConfidence(detection),
+        });
+      }
+    }
+  }
+  return records;
+}
+
+function repeatDetectionClusters(records) {
+  const clusters = [];
+  const recordsByView = new Map();
+  for (const record of records) {
+    if (!recordsByView.has(record.viewId)) recordsByView.set(record.viewId, []);
+    recordsByView.get(record.viewId).push(record);
+  }
+  for (const deploymentRecords of recordsByView.values()) {
+    const parents = deploymentRecords.map((_, index) => index);
+    const find = (index) => {
+      let current = index;
+      while (parents[current] !== current) current = parents[current];
+      while (parents[index] !== index) {
+        const next = parents[index];
+        parents[index] = current;
+        index = next;
+      }
+      return current;
+    };
+    const unite = (left, right) => {
+      const leftRoot = find(left);
+      const rightRoot = find(right);
+      if (leftRoot !== rightRoot) parents[rightRoot] = leftRoot;
+    };
+    for (let left = 0; left < deploymentRecords.length; left += 1) {
+      for (let right = left + 1; right < deploymentRecords.length; right += 1) {
+        if (detectionBoxIou(deploymentRecords[left].bbox, deploymentRecords[right].bbox) >= REPEAT_DETECTION_IOU) {
+          unite(left, right);
+        }
+      }
+    }
+    const components = new Map();
+    for (let index = 0; index < deploymentRecords.length; index += 1) {
+      const root = find(index);
+      if (!components.has(root)) components.set(root, []);
+      components.get(root).push(deploymentRecords[index]);
+    }
+    for (const members of components.values()) {
+      const eventIds = new Set(members.map((member) => member.eventId));
+      const days = new Set(members.map((member) => member.day));
+      if (eventIds.size < REPEAT_DETECTION_MIN_EVENTS || days.size < REPEAT_DETECTION_MIN_DAYS) continue;
+      clusters.push({
+        members,
+        eventIds,
+        days,
+        maxConfidence: Math.max(...members.map((member) => member.confidence)),
+      });
+    }
+  }
+  return clusters;
+}
+
+function applyRepeatDetectionCandidates(entries, referencesByEvent, detectionsByCacheKey) {
+  for (const { event } of entries) {
+    event.AIRepeatDetection = "";
+    event.AIRepeatDetectionSupport = "";
+  }
+  const records = repeatDetectionRecords(entries, referencesByEvent, detectionsByCacheKey);
+  const clusters = repeatDetectionClusters(records);
+  const recordsByEvent = new Map();
+  for (const record of records) {
+    if (!recordsByEvent.has(record.eventId)) recordsByEvent.set(record.eventId, []);
+    recordsByEvent.get(record.eventId).push(record);
+  }
+  const hotClusterByRecord = new Map();
+  for (const cluster of clusters) {
+    for (const record of cluster.members) hotClusterByRecord.set(record, cluster);
+  }
+  let flagged = 0;
+  for (const { event } of entries) {
+    const eventRecords = recordsByEvent.get(event.EventID) || [];
+    if (!eventRecords.length || eventRecords.some((record) => !hotClusterByRecord.has(record))) continue;
+    const supportingClusters = [...new Set(eventRecords.map((record) => hotClusterByRecord.get(record)))];
+    const supportEvents = Math.max(...supportingClusters.map((cluster) => cluster.eventIds.size));
+    const supportDays = Math.max(...supportingClusters.map((cluster) => cluster.days.size));
+    const maxConfidence = Math.max(...eventRecords.map((record) => record.confidence));
+    event.AIRepeatDetection = "yes";
+    event.AIRepeatDetectionSupport = [
+      REPEAT_DETECTION_VERSION,
+      `${supportEvents} 個事件`,
+      `${supportDays} 天`,
+      `IoU≥${REPEAT_DETECTION_IOU.toFixed(2)}`,
+      `最高信心 ${maxConfidence.toFixed(3)}`,
+    ].join(" · ");
+    flagged += 1;
+  }
+  return { flagged, clusters: clusters.length, records: records.length };
+}
+
+async function refreshRepeatDetectionCandidatesFromCache() {
+  const entries = webWorkspaceEvents()
+    .filter((event) => hasCurrentAiTriage(event))
+    .map((event) => ({ event }));
+  if (!entries.length) return { flagged: 0, clusters: 0, records: 0, changed: false };
+  const referencesByEvent = new Map(entries.map(({ event }) => [event.EventID, []]));
+  const detectionsByCacheKey = new Map();
+  for (const { event } of entries) {
+    for (const field of ["Photo1", "Photo3"]) {
+      const item = await fastMediaItem(event, field);
+      if (!item) continue;
+      const cached = await readDetectionCache(item);
+      if (!cached) continue;
+      referencesByEvent.get(event.EventID).push(item);
+      detectionsByCacheKey.set(item.cacheKey, cached);
+    }
+  }
+  const before = new Map(entries.map(({ event }) => [
+    event.EventID,
+    `${event.AIRepeatDetection || ""}\n${event.AIRepeatDetectionSupport || ""}`,
+  ]));
+  const result = applyRepeatDetectionCandidates(entries, referencesByEvent, detectionsByCacheKey);
+  result.changed = entries.some(({ event }) => before.get(event.EventID)
+    !== `${event.AIRepeatDetection || ""}\n${event.AIRepeatDetectionSupport || ""}`);
+  if (result.changed) await persistEvents("web");
+  return result;
+}
+
 async function persistFastPerformance(performance) {
   lastFastPerformance = performance;
   const temporary = `${config.ai.performanceFile}.tmp-${process.pid}-${Date.now()}`;
@@ -1358,15 +1644,7 @@ async function runFastAiBatch(entries) {
   const activeEntries = entries.filter(({ job }) => !job.cancelRequested);
   if (!activeEntries.length) return;
   const totalStarted = performance.now();
-  const startedAt = new Date().toISOString();
-  for (const { job, event } of activeEntries) {
-    job.status = "AI_RUNNING";
-    job.startedAt = startedAt;
-    job.message = "常駐 MegaDetector Worker 正在收集第 1、3 張照片…";
-    event.AIStatus = "AI_RUNNING";
-    event.AIError = "";
-  }
-  await persistEvents(activeEntries.every(({ event }) => event._source === "web") ? "web" : "all");
+  const sourceKind = activeEntries.every(({ event }) => event._source === "web") ? "web" : "all";
 
   try {
     const collectStarted = performance.now();
@@ -1409,70 +1687,130 @@ async function runFastAiBatch(entries) {
       speciesNetLoaded: false,
       videoFramesDecoded: 0,
     };
-    let workerResults = [];
-    if (missingItems.length) {
-      const response = await fastAiWorker.detect(missingItems.map((item) => ({
-        path: item.source,
-        token: item.token,
-        thumbnailPath: item.thumbnailPath,
-      })));
-      workerResults = response.results || [];
-      workerMetrics = response.metrics || workerMetrics;
-      if (workerMetrics.speciesNetLoaded) throw new Error("快速 Worker 不應載入 SpeciesNet。");
-      if (Number(workerMetrics.videoFramesDecoded) !== 0) throw new Error("快速 Worker 不應解碼影片影格。");
-      const resultByToken = new Map(workerResults.map((result) => [result.file, result]));
-      for (const item of missingItems) {
-        const result = resultByToken.get(item.token);
-        if (!result) throw new Error(`MegaDetector 未回傳照片結果：${item.token}`);
-        detectionsByCacheKey.set(item.cacheKey, result);
-      }
-      const cacheWriteStarted = performance.now();
-      await Promise.all(missingItems.map((item) => writeDetectionCache(item, detectionsByCacheKey.get(item.cacheKey))));
-      workerMetrics.cacheWriteSeconds = (performance.now() - cacheWriteStarted) / 1000;
-    }
+    const referencesByEvent = new Map(activeEntries.map(({ event }) => [event.EventID, []]));
+    for (const item of references) referencesByEvent.get(item.eventId)?.push(item);
+    let cacheWriteSeconds = 0;
+    let applySeconds = 0;
+    let persistSeconds = 0;
 
-    const applyStarted = performance.now();
-    const byEvent = new Map(activeEntries.map(({ event }) => [event.EventID, []]));
-    for (const item of references) {
-      const result = detectionsByCacheKey.get(item.cacheKey);
-      byEvent.get(item.eventId).push({ ...result, file: item.field });
-    }
-    for (const { job, event } of activeEntries) {
-      if (job.cancelRequested) {
+    // Keep one Python process and one loaded model, but commit one event at a
+    // time.  A 500-photo CPU request can otherwise look frozen for 40+ minutes
+    // because the worker returns only after the whole request is complete.
+    for (let index = 0; index < activeEntries.length; index += 1) {
+      const { job, event } = activeEntries[index];
+      await waitForAiQueueResume();
+      if (job.cancelRequested || job.status === "CANCELLED") {
         job.status = "CANCELLED";
+        job.finishedAt ||= new Date().toISOString();
         job.message = "工作已取消；辨識結果未寫入。";
         continue;
       }
-      const rawResult = {
-        images: byEvent.get(event.EventID),
-        detection_categories: { "1": "animal", "2": "person", "3": "vehicle" },
-      };
-      const summary = summarizeAiResult(rawResult, config.ai.detectionThresholdForClassification);
-      applyAiSummaryToEvent(event, summary, {
-        identifySpecies: false,
-        mode: "fast",
-        architecture: "worker=resident-batch-v1",
-      });
-      job.status = "AI_COMPLETE";
-      job.message = fastJobMessage(event);
+
+      job.status = "AI_RUNNING";
+      job.startedAt ||= new Date().toISOString();
+      job.message = `快速模式：正在辨識第 ${index + 1} / ${activeEntries.length} 組的第 1、3 張照片…`;
+      event.AIStatus = "AI_RUNNING";
+      event.AIError = "";
+
+      try {
+        const eventItems = referencesByEvent.get(event.EventID) || [];
+        const eventMissingByCacheKey = new Map();
+        for (const item of eventItems) {
+          if (!detectionsByCacheKey.has(item.cacheKey)) eventMissingByCacheKey.set(item.cacheKey, item);
+        }
+        const eventMissingItems = [...eventMissingByCacheKey.values()];
+        if (eventMissingItems.length) {
+          const response = await fastAiWorker.detect(eventMissingItems.map((item) => ({
+            path: item.source,
+            token: item.token,
+            thumbnailPath: item.thumbnailPath,
+          })));
+          const responseMetrics = response.metrics || {};
+          if (responseMetrics.speciesNetLoaded) throw new Error("快速 Worker 不應載入 SpeciesNet。");
+          if (Number(responseMetrics.videoFramesDecoded) !== 0) throw new Error("快速 Worker 不應解碼影片影格。");
+          const resultByToken = new Map((response.results || []).map((result) => [result.file, result]));
+          for (const item of eventMissingItems) {
+            const result = resultByToken.get(item.token);
+            if (!result) throw new Error(`MegaDetector 未回傳照片結果：${item.token}`);
+            detectionsByCacheKey.set(item.cacheKey, result);
+          }
+          workerMetrics.photos += Number(responseMetrics.photos || 0);
+          workerMetrics.batches += Number(responseMetrics.batches || 0);
+          workerMetrics.decodeSeconds += Number(responseMetrics.decodeSeconds || 0);
+          workerMetrics.thumbnailSeconds += Number(responseMetrics.thumbnailSeconds || 0);
+          workerMetrics.thumbnailsCreated += Number(responseMetrics.thumbnailsCreated || 0);
+          workerMetrics.inferenceSeconds += Number(responseMetrics.inferenceSeconds || 0);
+          workerMetrics.workerSeconds += Number(responseMetrics.workerSeconds || 0);
+          workerMetrics.batchSize = Number(responseMetrics.batchSize || workerMetrics.batchSize || 1);
+          workerMetrics.device = responseMetrics.device || workerMetrics.device;
+          workerMetrics.modelLoadCount = Number(responseMetrics.modelLoadCount || workerMetrics.modelLoadCount || 0);
+
+          const cacheWriteStarted = performance.now();
+          await Promise.all(eventMissingItems.map((item) => writeDetectionCache(item, detectionsByCacheKey.get(item.cacheKey))));
+          cacheWriteSeconds += (performance.now() - cacheWriteStarted) / 1000;
+        }
+
+        if (job.cancelRequested || job.status === "CANCELLED") {
+          event.AIStatus = "AI_PENDING";
+          event.AIError = "辨識已取消；可重新啟動批次工作。";
+          job.status = "CANCELLED";
+          job.message = "工作已取消；辨識結果未寫入。";
+        } else {
+          const eventApplyStarted = performance.now();
+          const images = eventItems.map((item) => {
+            const result = detectionsByCacheKey.get(item.cacheKey);
+            if (!result) throw new Error(`MegaDetector 缺少照片結果：${item.token}`);
+            return { ...result, file: item.field };
+          });
+          const rawResult = {
+            images,
+            detection_categories: { "1": "animal", "2": "person", "3": "vehicle" },
+          };
+          const summary = summarizeAiResult(rawResult, config.ai.detectionThresholdForClassification);
+          applyAiSummaryToEvent(event, summary, {
+            identifySpecies: false,
+            mode: "fast",
+            architecture: "worker=resident-progressive-v2",
+          });
+          job.status = "AI_COMPLETE";
+          job.message = fastJobMessage(event);
+          applySeconds += (performance.now() - eventApplyStarted) / 1000;
+        }
+      } catch (error) {
+        event.AIStatus = "FAILED";
+        event.AIError = error.message.slice(0, 4000);
+        event.AIProcessedAt = new Date().toISOString();
+        job.status = "FAILED";
+        job.error = event.AIError;
+        job.message = "常駐 MegaDetector Worker 失敗；人工答案未被修改。";
+      } finally {
+        job.finishedAt = new Date().toISOString();
+        const eventPersistStarted = performance.now();
+        saveQueue = saveQueue.then(() => persistEvent(event), () => persistEvent(event));
+        await saveQueue;
+        persistSeconds += (performance.now() - eventPersistStarted) / 1000;
+      }
     }
-    const applySeconds = (performance.now() - applyStarted) / 1000;
-    const persistStarted = performance.now();
-    await persistEvents(activeEntries.every(({ event }) => event._source === "web") ? "web" : "all");
-    const persistSeconds = (performance.now() - persistStarted) / 1000;
+
+    const repeatDetectionStarted = performance.now();
+    const repeatDetection = applyRepeatDetectionCandidates(activeEntries, referencesByEvent, detectionsByCacheKey);
+    await persistEvents(sourceKind);
+    const repeatDetectionSeconds = (performance.now() - repeatDetectionStarted) / 1000;
+
     const totalSeconds = (performance.now() - totalStarted) / 1000;
     const requestedPhotos = references.length;
-    const inferredPhotos = missingItems.length;
+    const inferredPhotos = Number(workerMetrics.photos || 0);
     const performanceReport = {
       schemaVersion: 1,
-      architecture: "resident-batch-worker-v1",
+      architecture: "resident-progressive-worker-v2",
       mode: "fast",
       completedAt: new Date().toISOString(),
       events: activeEntries.length,
       requestedPhotos,
       uniquePhotos: uniqueByCacheKey.size,
       inferredPhotos,
-      detectionCacheHits: uniqueByCacheKey.size - inferredPhotos,
+      detectionCacheHits: uniqueByCacheKey.size - missingItems.length,
+      repeatDetection,
       manifestShaHits: references.filter((item) => item.usedManifestSha).length,
       sha256Recomputed: 0,
       videosOpened: 0,
@@ -1496,9 +1834,10 @@ async function runFastAiBatch(entries) {
         decode: Number(workerMetrics.decodeSeconds || 0),
         thumbnails: Number(workerMetrics.thumbnailSeconds || 0),
         inference: Number(workerMetrics.inferenceSeconds || 0),
-        cacheWrite: Number(workerMetrics.cacheWriteSeconds || 0),
+        cacheWrite: Number(cacheWriteSeconds.toFixed(4)),
         applyResults: Number(applySeconds.toFixed(4)),
         persist: Number(persistSeconds.toFixed(4)),
+        repeatDetection: Number(repeatDetectionSeconds.toFixed(4)),
         total: Number(totalSeconds.toFixed(4)),
       },
       thumbnailsCreated: Number(workerMetrics.thumbnailsCreated || 0),
@@ -1508,7 +1847,7 @@ async function runFastAiBatch(entries) {
     await persistFastPerformance(performanceReport);
   } catch (error) {
     for (const { job, event } of activeEntries) {
-      if (job.status === "CANCELLED") continue;
+      if (["AI_COMPLETE", "CANCELLED", "FAILED"].includes(job.status)) continue;
       event.AIStatus = "FAILED";
       event.AIError = error.message.slice(0, 4000);
       event.AIProcessedAt = new Date().toISOString();
@@ -1516,11 +1855,11 @@ async function runFastAiBatch(entries) {
       job.error = event.AIError;
       job.message = "常駐 MegaDetector Worker 失敗；人工答案未被修改。";
     }
-    await persistEvents(activeEntries.every(({ event }) => event._source === "web") ? "web" : "all");
+    await persistEvents(sourceKind);
     throw error;
   } finally {
     const finishedAt = new Date().toISOString();
-    for (const { job } of activeEntries) job.finishedAt = finishedAt;
+    for (const { job } of activeEntries) job.finishedAt ||= finishedAt;
   }
 }
 
@@ -1559,7 +1898,7 @@ async function runAiJob(job, event) {
     const args = !identifySpecies
       ? [
         "-m", "megadetector.detection.run_detector_batch",
-        config.ai.detectorModel, inputRoot, resultFile,
+        config.ai.detectorModelPath, inputRoot, resultFile,
         "--recursive", "--output_relative_filenames", "--include_max_conf",
         "--threshold", String(config.ai.detectionThresholdForClassification),
         "--ncores", "2",
@@ -1567,7 +1906,7 @@ async function runAiJob(job, event) {
       : [
         "-m", "megadetector.detection.run_md_and_speciesnet",
         inputRoot, resultFile,
-        "--detector_model", config.ai.detectorModel,
+        "--detector_model", config.ai.detectorModelPath,
         "--detection_confidence_threshold_for_classification", String(config.ai.detectionThresholdForClassification),
         "--detection_confidence_threshold_for_output", String(config.ai.detectionThresholdForOutput),
         "--time_sample", String(config.ai.timeSampleSeconds),
@@ -1618,6 +1957,13 @@ async function runAiJob(job, event) {
 }
 
 async function createAiJob(event, options = {}) {
+  const detectorModelStat = existsSync(config.ai.detectorModelPath)
+    ? await stat(config.ai.detectorModelPath)
+    : null;
+  if (!detectorModelStat || detectorModelStat.size < 50_000_000) {
+    aiRuntimeStatus = null;
+    throw requestError(503, "MegaDetector 權重不存在或下載不完整；請重新執行「安裝AI辨識環境.cmd」後再開始辨識。");
+  }
   const active = [...aiJobs.values()].find((job) => job.eventId === event.EventID && ["AI_PENDING", "AI_RUNNING"].includes(job.status));
   if (active) return { job: active, created: false };
   const mode = normalizeAiMode(options.mode, "full");
@@ -1660,27 +2006,32 @@ function isCompleteForAiPreference(event, identifySpecies = false, mode = "fast"
   if (!identifySpecies) return true;
   const labels = String(event.AIEventLabels || "").split(";");
   if (!labels.includes("animal")) return true;
+  if (event.AIRepeatDetection === "yes") return true;
   const modelVersion = String(event.AIModelVersion || "");
   return modelVersion.includes("species=yes")
     && modelVersion.includes(SPECIES_RESULT_VERSION)
     && Boolean(String(event.AISpecies || "").trim());
 }
 
-function aiBatchStatus(identifySpecies = aiBatchPreference.identifySpecies, mode = aiBatchPreference.mode) {
+function aiBatchStatus(identifySpecies = aiBatchPreference.identifySpecies, mode = aiBatchPreference.mode, deploymentId = "") {
   mode = normalizeAiMode(mode, "fast");
   identifySpecies = mode === "fast" ? false : Boolean(identifySpecies);
-  const workspace = webWorkspaceEvents();
+  const workspace = webWorkspaceEvents(deploymentId);
   const workspaceIds = new Set(workspace.map((event) => event.EventID));
   const jobs = [...aiJobs.values()];
+  const globalActiveJobs = jobs.filter((job) => ["AI_PENDING", "AI_RUNNING"].includes(job.status));
   const activeJobs = jobs.filter((job) => workspaceIds.has(job.eventId) && ["AI_PENDING", "AI_RUNNING"].includes(job.status));
   const runningJob = activeJobs.find((job) => job.status === "AI_RUNNING");
   const complete = workspace.filter((event) => isCompleteForAiPreference(event, identifySpecies, mode)).length;
   const failed = workspace.filter((event) => event.AIStatus === "FAILED").length;
   const emptyTrigger = workspace.filter((event) => hasCurrentAiTriage(event) && event.AIEventLabels === "empty").length;
-  const needsSpecies = workspace.filter((event) => hasCurrentAiTriage(event) && String(event.AIEventLabels).split(";").includes("animal")).length;
+  const repeatCandidates = workspace.filter((event) => hasCurrentAiTriage(event) && event.AIRepeatDetection === "yes").length;
+  const needsSpecies = workspace.filter((event) => hasCurrentAiTriage(event)
+    && event.AIRepeatDetection !== "yes"
+    && String(event.AIEventLabels).split(";").includes("animal")).length;
   const speciesPending = workspace.filter((event) => {
     const labels = String(event.AIEventLabels || "").split(";");
-    return labels.includes("animal") && !isCompleteForAiPreference(event, true, mode);
+    return labels.includes("animal") && event.AIRepeatDetection !== "yes" && !isCompleteForAiPreference(event, true, mode);
   }).length;
   return {
     total: workspace.length,
@@ -1688,26 +2039,34 @@ function aiBatchStatus(identifySpecies = aiBatchPreference.identifySpecies, mode
     failed,
     emptyTrigger,
     needsSpecies,
+    repeatCandidates,
     speciesPending,
     remaining: workspace.length - complete,
     queued: activeJobs.filter((job) => job.status === "AI_PENDING").length,
     running: activeJobs.filter((job) => job.status === "AI_RUNNING").length,
     active: activeJobs.length > 0,
+    globalActive: globalActiveJobs.length > 0,
     paused: aiQueuePaused,
     currentEventId: runningJob?.eventId || "",
     identifySpecies: Boolean(identifySpecies),
     mode,
+    deploymentId,
     performance: lastFastPerformance,
     worker: fastAiWorker.publicStatus(),
   };
 }
 
-async function createAiBatch(mode = "fast", identifySpecies = false) {
+async function createAiBatch(mode = "fast", identifySpecies = false, deploymentId = "") {
   const normalizedMode = normalizeAiMode(mode, "fast");
   const requestedSpecies = normalizeIdentifySpecies(identifySpecies, false);
   const normalizedSpecies = normalizedMode === "fast" ? false : requestedSpecies;
   aiBatchPreference = { mode: normalizedMode, identifySpecies: normalizedSpecies };
-  const workspace = webWorkspaceEvents();
+  const selectedBatch = requireWebWorkspaceBatch(deploymentId);
+  deploymentId = selectedBatch.deploymentId;
+  const workspace = selectedBatch.workspace;
+  const workspaceIds = new Set(workspace.map((event) => event.EventID));
+  const otherActiveJob = [...aiJobs.values()].find((job) => ["AI_PENDING", "AI_RUNNING"].includes(job.status) && !workspaceIds.has(job.eventId));
+  if (otherActiveJob) throw requestError(409, "另一個匯入批次正在辨識，請等待完成或先暫停目前工作。");
   let candidates = workspace.filter((event) => !isCompleteForAiPreference(event, normalizedSpecies, normalizedMode));
   const reclassified = normalizedSpecies
     ? await reclassifyCachedSpeciesResults(candidates, normalizedMode)
@@ -1749,12 +2108,12 @@ async function createAiBatch(mode = "fast", identifySpecies = false) {
     speciesSuppressedInFastMode: normalizedMode === "fast" && requestedSpecies,
     reclassified,
     skippedCompleted: workspace.length - candidates.length,
-    status: aiBatchStatus(normalizedSpecies, normalizedMode),
+    status: aiBatchStatus(normalizedSpecies, normalizedMode, deploymentId),
   };
 }
 
-function cancelWorkspaceAiJobs() {
-  const workspaceIds = new Set(webWorkspaceEvents().map((event) => event.EventID));
+function cancelWorkspaceAiJobs(deploymentId = "") {
+  const workspaceIds = new Set(webWorkspaceEvents(deploymentId).map((event) => event.EventID));
   let cancelled = 0;
   for (const job of aiJobs.values()) {
     if (!workspaceIds.has(job.eventId) || !["AI_PENDING", "AI_RUNNING"].includes(job.status)) continue;
@@ -1768,9 +2127,11 @@ function cancelWorkspaceAiJobs() {
   return cancelled;
 }
 
-async function resetAiWorkspace() {
-  const workspace = webWorkspaceEvents();
-  const cancelled = cancelWorkspaceAiJobs();
+async function resetAiWorkspace(deploymentId) {
+  const selectedBatch = requireWebWorkspaceBatch(deploymentId);
+  deploymentId = selectedBatch.deploymentId;
+  const workspace = selectedBatch.workspace;
+  const cancelled = cancelWorkspaceAiJobs(deploymentId);
   const aiDrivenReviewStatuses = new Set(["AI_PENDING", "AI_RUNNING", "AI_COMPLETE", "NEEDS_REVIEW", "CONFLICT", "FAILED"]);
   for (const event of workspace) {
     for (const field of AI_FIELDS) event[field] = "";
@@ -1778,25 +2139,39 @@ async function resetAiWorkspace() {
     if (!event.HumanLabels && aiDrivenReviewStatuses.has(event.ReviewStatus)) event.ReviewStatus = "";
   }
   await persistEvents("web");
-  return { reset: workspace.length, cancelled, status: aiBatchStatus(aiBatchPreference.identifySpecies, aiBatchPreference.mode) };
+  return { deploymentId, reset: workspace.length, cancelled, status: aiBatchStatus(aiBatchPreference.identifySpecies, aiBatchPreference.mode, deploymentId) };
 }
 
-async function clearWebWorkspace() {
-  const removed = webWorkspaceEvents().length;
-  const cancelled = cancelWorkspaceAiJobs();
-  events = events.filter((event) => !isWebWorkspaceEvent(event));
-  importSessions.clear();
+async function clearWebWorkspace(deploymentId) {
+  const selectedBatch = requireWebWorkspaceBatch(deploymentId);
+  deploymentId = selectedBatch.deploymentId;
+  const workspace = selectedBatch.workspace;
+  const removed = workspace.length;
+  const cancelled = cancelWorkspaceAiJobs(deploymentId);
+  const importIds = new Set();
+  for (const event of workspace) {
+    for (const field of ["Photo1", "Photo2", "Photo3", "Video"]) {
+      const importId = String(event[field] || "").replaceAll("\\", "/").split("/")[0];
+      if (/^IMP-[A-Za-z0-9-]+$/.test(importId)) importIds.add(importId);
+    }
+  }
+  for (const [importId, session] of importSessions) {
+    if (session.deploymentId === deploymentId) importIds.add(importId);
+  }
+  events = events.filter((event) => !(isWebWorkspaceEvent(event) && event.DeploymentID === deploymentId));
+  for (const importId of importIds) {
+    const importMediaRoot = pathInside(config.webUploads.mediaRoot, importId);
+    const sessionFile = pathInside(config.webUploads.sessionsRoot, `${importId}.json`);
+    await rm(importMediaRoot, { recursive: true, force: true });
+    await unlink(sessionFile).catch((error) => {
+      if (error?.code !== "ENOENT") throw error;
+    });
+    importSessions.delete(importId);
+  }
   mediaPaths.clear();
   for (const event of events) registerEventMedia(event);
-  await rm(config.webUploads.mediaRoot, { recursive: true, force: true });
-  await rm(config.webUploads.sessionsRoot, { recursive: true, force: true });
-  await unlink(config.webUploads.eventsCsv).catch((error) => {
-    if (error?.code !== "ENOENT") throw error;
-  });
-  await mkdir(config.webUploads.mediaRoot, { recursive: true });
-  await mkdir(config.webUploads.sessionsRoot, { recursive: true });
   await persistEvents("web");
-  return { removed, cancelled, status: aiBatchStatus(aiBatchPreference.identifySpecies, aiBatchPreference.mode) };
+  return { deploymentId, removed, cancelled, status: aiBatchStatus(aiBatchPreference.identifySpecies, aiBatchPreference.mode, deploymentId) };
 }
 
 function statusSummary() {
@@ -1887,7 +2262,8 @@ const server = http.createServer(async (request, response) => {
     } else if (request.method === "GET" && url.pathname === "/api/ai/batch") {
       const identifySpecies = normalizeIdentifySpecies(url.searchParams.get("identifySpecies"), aiBatchPreference.identifySpecies);
       const mode = normalizeAiMode(url.searchParams.get("mode"), aiBatchPreference.mode);
-      jsonResponse(response, 200, { ok: true, status: aiBatchStatus(identifySpecies, mode) });
+      const deploymentId = String(url.searchParams.get("deploymentId") || "").trim();
+      jsonResponse(response, 200, { ok: true, status: aiBatchStatus(identifySpecies, mode, deploymentId) });
     } else if (request.method === "GET" && url.pathname.startsWith("/api/ai/jobs/")) {
       const jobId = decodeURIComponent(url.pathname.slice("/api/ai/jobs/".length));
       const job = aiJobs.get(jobId);
@@ -1967,21 +2343,22 @@ const server = http.createServer(async (request, response) => {
       const batch = await createAiBatch(
         normalizeAiMode(body.mode, "fast"),
         normalizeIdentifySpecies(body.identifySpecies, false),
+        body.deploymentId,
       );
       jsonResponse(response, batch.created ? 202 : 200, { ok: true, ...batch });
     } else if (request.method === "POST" && url.pathname === "/api/ai/batch/pause") {
       const body = await readRequestBody(request);
       setAiQueuePaused(Boolean(body.paused));
-      jsonResponse(response, 200, { ok: true, status: aiBatchStatus(aiBatchPreference.identifySpecies, aiBatchPreference.mode) });
+      jsonResponse(response, 200, { ok: true, status: aiBatchStatus(aiBatchPreference.identifySpecies, aiBatchPreference.mode, String(body.deploymentId || "").trim()) });
     } else if (request.method === "POST" && url.pathname === "/api/ai/reset") {
       const body = await readRequestBody(request);
-      if (body.confirm !== "RESET_AI_WORKSPACE") throw requestError(400, "缺少 AI 重置確認。");
-      const result = await resetAiWorkspace();
+      if (body.confirm !== "RESET_AI_BATCH") throw requestError(400, "缺少 AI 批次重置確認。");
+      const result = await resetAiWorkspace(body.deploymentId);
       jsonResponse(response, 200, { ok: true, ...result });
     } else if (request.method === "POST" && url.pathname === "/api/workspace/clear") {
       const body = await readRequestBody(request);
-      if (body.confirm !== "CLEAR_UPLOAD_WORKSPACE") throw requestError(400, "缺少清除工作區確認。");
-      const result = await clearWebWorkspace();
+      if (body.confirm !== "CLEAR_UPLOAD_BATCH") throw requestError(400, "缺少清除匯入批次確認。");
+      const result = await clearWebWorkspace(body.deploymentId);
       jsonResponse(response, 200, { ok: true, ...result });
     } else if (request.method === "POST" && url.pathname === "/api/annotations") {
       const body = await readRequestBody(request);
@@ -1995,6 +2372,7 @@ const server = http.createServer(async (request, response) => {
       for (const field of EDITABLE_FIELDS) {
         if (field in body) event[field] = String(body[field] ?? "");
       }
+      synchronizeHumanReviewStatus(event);
       event.SchemaVersion = "2.1";
       event.LastModifiedAt = new Date().toISOString();
       event.LastModifiedBy = event.Annotator || event.SecondReviewer || event.Adjudicator || "UNKNOWN";
@@ -2005,6 +2383,8 @@ const server = http.createServer(async (request, response) => {
       await saveQueue;
       await appendAuditEntry(before, event);
       jsonResponse(response, 200, { ok: true, event: publicEvent(event), status: statusSummary() });
+    } else if (["GET", "HEAD"].includes(request.method) && url.pathname.startsWith("/video-preview/")) {
+      await serveVideoPreview(request, response, url.pathname.slice("/video-preview/".length));
     } else if (request.method === "GET" && url.pathname.startsWith("/thumbnail/")) {
       await serveThumbnail(response, url.pathname.slice("/thumbnail/".length));
     } else if (request.method === "GET" && url.pathname.startsWith("/media/")) {
@@ -2024,6 +2404,14 @@ const server = http.createServer(async (request, response) => {
 });
 
 await loadState();
+try {
+  const repeatDetectionRefresh = await refreshRepeatDetectionCandidatesFromCache();
+  if (repeatDetectionRefresh.records) {
+    console.log(`固定背景重複誤判檢查：${repeatDetectionRefresh.flagged} 組候選／${repeatDetectionRefresh.clusters} 個熱點`);
+  }
+} catch (error) {
+  console.error("固定背景重複誤判檢查失敗；保留既有 AI 結果。", error);
+}
 server.listen(config.port, "127.0.0.1", () => {
   console.log(`${config.appName} 已啟動：http://127.0.0.1:${config.port}`);
   console.log(`事件數：${events.length}`);

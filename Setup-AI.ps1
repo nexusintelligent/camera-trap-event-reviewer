@@ -11,6 +11,8 @@ $venvRoot = Join-Path $runtimeBase 'venv311'
 $venvPython = Join-Path $venvRoot 'Scripts\python.exe'
 $pipCache = Join-Path $runtimeBase 'pip-cache'
 $modelCache = Join-Path $runtimeBase 'model-cache'
+$detectorCache = Join-Path $projectRoot 'local-data\model-cache\megadetector'
+$detectorModel = Join-Path $detectorCache 'md_v1000.0.0-redwood.pt'
 $requirements = Join-Path $projectRoot 'ai\requirements-ai.txt'
 $pythonZip = Join-Path $env:TEMP 'python-3.11.9-embed-amd64.zip'
 $getPip = Join-Path $env:TEMP 'get-pip.py'
@@ -64,7 +66,7 @@ function Resolve-BasePython {
     return $null
 }
 
-New-Item -ItemType Directory -Force -Path $runtimeBase, $pipCache, $modelCache | Out-Null
+New-Item -ItemType Directory -Force -Path $runtimeBase, $pipCache, $modelCache, $detectorCache | Out-Null
 $resolvedPython = Resolve-BasePython
 
 if ($resolvedPython) {
@@ -97,10 +99,21 @@ Invoke-Checked $runtimePython @('-m', 'pip', 'install', '--upgrade', 'pip')
 # The legacy resolver installs their tested runtime combination; imports and CLI are validated below.
 Invoke-Checked $runtimePython @('-m', 'pip', 'install', '--use-deprecated=legacy-resolver', '--requirement', $requirements)
 Invoke-Checked $runtimePython @('-c', "import megadetector, speciesnet; print('MegaDetector + SpeciesNet imports: PASS')")
+$detectorUrl = 'https://github.com/agentmorris/MegaDetector/releases/download/v1000.0/md_v1000.0.0-redwood.pt'
+if ((Test-Path -LiteralPath $detectorModel) -and (Get-Item -LiteralPath $detectorModel).Length -lt 50000000) {
+    Remove-Item -LiteralPath $detectorModel -Force
+}
+Download-File $detectorUrl $detectorModel
+if ((Get-Item -LiteralPath $detectorModel).Length -lt 50000000) {
+    Remove-Item -LiteralPath $detectorModel -Force
+    throw 'MegaDetector model download is incomplete. Run this installer again.'
+}
+$env:CAMTRAP_AI_DETECTOR_MODEL_FILE = $detectorModel
+Invoke-Checked $runtimePython @('-c', "import os; from megadetector.detection.run_detector import load_detector; load_detector(os.environ['CAMTRAP_AI_DETECTOR_MODEL_FILE']); print('MegaDetector model: PASS')")
 $helpOutput = & $runtimePython -m megadetector.detection.run_md_and_speciesnet --help
 if ($LASTEXITCODE -ne 0) { throw 'MegaDetector + SpeciesNet CLI validation failed.' }
 $helpOutput | Select-Object -First 12
 
 Write-Host ''
 Write-Host "PASS: AI runtime is ready at $runtimePython" -ForegroundColor Green
-Write-Host 'Official model weights download on first inference.'
+Write-Host "MegaDetector model cache: $detectorModel"

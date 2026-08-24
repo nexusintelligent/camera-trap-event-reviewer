@@ -13,7 +13,7 @@
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="./icons/icon-180.png">
-  <link rel="stylesheet" href="./styles.css?v=2.8.0">
+  <link rel="stylesheet" href="./styles.css?v=2.11.1">
 </head>
 <body>
   <header class="topbar">
@@ -76,6 +76,11 @@
           <span class="status-pill" id="batch-state-pill">尚未執行</span>
         </div>
 
+        <label class="ai-batch-picker">要辨識／管理的匯入批次
+          <select id="ai-batch-select" aria-label="選擇要進行 AI 辨識或管理的批次"></select>
+          <small>下方辨識、重置與清除操作只會套用到這個批次。</small>
+        </label>
+
         <div class="upload-stat-grid">
           <div><span>上傳事件</span><strong id="upload-total">0</strong></div>
           <div><span>AI 已完成</span><strong id="upload-ai-complete">0</strong></div>
@@ -105,7 +110,7 @@
         </fieldset>
 
         <div class="batch-actions">
-          <button class="button primary" id="start-ai-batch-button" type="button" disabled>一鍵辨識全部尚未完成</button>
+          <button class="button primary" id="start-ai-batch-button" type="button" disabled>辨識所選批次尚未完成事件</button>
           <button class="button warm" id="pause-ai-batch-button" type="button" disabled>完成目前這組後暫停</button>
           <button class="button ghost" id="reset-ai-workspace-button" type="button" disabled>重置 AI 結果</button>
           <button class="button danger-outline" id="clear-upload-workspace-button" type="button" disabled>清除上傳事件</button>
@@ -147,6 +152,7 @@
       <div class="upload-result-tabs" id="upload-result-tabs" aria-label="篩選當次辨識結果">
         <button class="active" type="button" data-result-filter="all">全部 <span id="result-count-all">0</span></button>
         <button type="button" data-result-filter="empty">空觸發 <span id="result-count-empty">0</span></button>
+        <button type="button" data-result-filter="repeat_detection">疑似背景誤判 <span id="result-count-repeat">0</span></button>
         <button type="button" data-result-filter="needs_species">動物／物種結果 <span id="result-count-species">0</span></button>
         <button type="button" data-result-filter="other_nonempty">人／車輛 <span id="result-count-other">0</span></button>
         <button type="button" data-result-filter="pending">尚未完成 <span id="result-count-pending">0</span></button>
@@ -188,6 +194,7 @@
               <option value="all">全部 AI 結果</option>
               <option value="empty">空觸發</option>
               <option value="animal">有動物</option>
+              <option value="repeat_detection">疑似背景誤判</option>
               <option value="person_vehicle">人／車</option>
             </select>
           </label>
@@ -411,9 +418,15 @@
   </div>
 
   <dialog id="image-dialog" class="image-dialog">
-    <button id="close-dialog" type="button" aria-label="關閉">×</button>
-    <img id="dialog-image" alt="放大照片">
-    <div id="dialog-caption"></div>
+    <button class="image-dialog-close" id="close-dialog" type="button" aria-label="關閉">×</button>
+    <button class="image-dialog-nav previous" id="dialog-previous" type="button" aria-label="上一張照片">‹</button>
+    <div class="image-dialog-stage"><img id="dialog-image" alt="放大照片"></div>
+    <button class="image-dialog-nav next" id="dialog-next" type="button" aria-label="下一張照片">›</button>
+    <div class="image-dialog-footer">
+      <span id="dialog-caption"></span>
+      <strong id="dialog-position" aria-live="polite">1 / 3</strong>
+      <small>可使用鍵盤 ← → 切換</small>
+    </div>
   </dialog>
 
   <dialog id="ai-result-dialog" class="ai-result-dialog">
@@ -468,6 +481,6 @@
   </dialog>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="./app.js?v=2.8.0"></script>
+  <script type="module" src="./app.js?v=2.11.1"></script>
 </body>
 </html>
