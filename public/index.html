@@ -13,7 +13,7 @@
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="./icons/icon-180.png">
-  <link rel="stylesheet" href="./styles.css?v=3.0.0">
+  <link rel="stylesheet" href="./styles.css?v=3.1.0">
 </head>
 <body>
   <header class="topbar">
@@ -449,7 +449,7 @@
   <dialog id="import-dialog" class="import-dialog">
     <div class="dialog-head">
       <div>
-        <div class="eyebrow">LOCAL WORKSPACE · V3.0</div>
+        <div class="eyebrow">LOCAL WORKSPACE · V3.1</div>
         <h2>選擇媒體並建立事件</h2>
       </div>
       <button id="close-import-dialog" type="button" aria-label="關閉">×</button>
@@ -493,16 +493,16 @@
     </div>
     <div class="local-setup-body">
       <ol class="setup-steps">
-        <li><span>1</span><div><strong>第一次使用：安裝 AI</strong><p>在專案資料夾雙擊 <code>安裝AI辨識環境.cmd</code>。它會建立專屬 Python 環境並下載必要模型。</p></div></li>
+        <li><span>1</span><div><strong>第一次使用：安裝本機辨識環境</strong><p>在專案資料夾雙擊 <code>安裝照片辨識軟體.cmd</code>。它會自動準備 Node.js、Python 與必要 AI 模型，不需另外安裝或設定 PATH。</p></div></li>
         <li><span>2</span><div><strong>啟動本機服務</strong><p>雙擊 <code>啟動照片辨識軟體.cmd</code>。服務只監聽 <code>127.0.0.1:4173</code>，外部電腦無法讀取你的資料。</p></div></li>
         <li><span>3</span><div><strong>回到這個頁面並重新連線</strong><p>按上方「重新連線」，接著選擇照片或資料夾即可建立獨立工作區。</p></div></li>
       </ol>
       <div class="local-privacy-note"><strong>資料位置</strong><span>照片工作副本、AI 模型與匯出成果會放在 <code>%LOCALAPPDATA%\\CameraTrapReviewer</code>。不同使用者、不同電腦之間不會自動同步。</span></div>
-      <p class="setup-support">若啟動失敗，先確認已安裝 Node.js 20 以上版本；再查看專案內的 <code>logs\\server.stderr.log</code>。</p>
+      <p class="setup-support">若啟動失敗，請重新執行安裝程式；仍無法啟動時再查看專案內的 <code>logs\\server.stderr.log</code>。</p>
     </div>
   </dialog>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="./app.js?v=3.0.0"></script>
+  <script type="module" src="./app.js?v=3.1.0"></script>
 </body>
 </html>

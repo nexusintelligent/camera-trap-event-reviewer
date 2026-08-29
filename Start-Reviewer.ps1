@@ -1,6 +1,8 @@
 ﻿$ErrorActionPreference = 'Stop'
 
 $appRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$runtimeBase = Join-Path $env:LOCALAPPDATA 'CameraTrapReviewer'
+$portableNode = Join-Path $runtimeBase 'node\node.exe'
 $configPath = Join-Path $appRoot 'config.json'
 $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $reviewerUrl = "http://127.0.0.1:$($config.port)/"
@@ -18,11 +20,19 @@ try {
 }
 
 $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
-$nodeExecutable = if ($nodeCommand) { $nodeCommand.Source } else { $null }
+$nodeExecutable = if (Test-Path -LiteralPath $portableNode) { $portableNode } elseif ($nodeCommand) { $nodeCommand.Source } else { $null }
 
 if (-not $nodeExecutable) {
     Write-Host '找不到 Node.js，無法啟動照片判讀軟體。' -ForegroundColor Red
-    Write-Host '請安裝 Node.js 20 以上版本後，再重新執行此檔案。'
+    Write-Host '請先雙擊「安裝照片辨識軟體.cmd」；安裝程式會自動準備 Node.js 與 AI。'
+    Read-Host '按 Enter 關閉'
+    exit 1
+}
+
+$nodeVersion = & $nodeExecutable --version
+if ($LASTEXITCODE -ne 0 -or $nodeVersion -notmatch '^v(\d+)' -or [int]$Matches[1] -lt 20) {
+    Write-Host "Node.js 版本不符合需求：$nodeVersion" -ForegroundColor Red
+    Write-Host '請重新執行「安裝照片辨識軟體.cmd」。'
     Read-Host '按 Enter 關閉'
     exit 1
 }

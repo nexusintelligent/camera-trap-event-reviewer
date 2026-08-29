@@ -1,10 +1,22 @@
 param(
-    [string]$BasePython = ''
+    [string]$BasePython = '',
+    [switch]$NodeOnly
 )
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $runtimeBase = Join-Path $env:LOCALAPPDATA 'CameraTrapReviewer'
+$nodeVersion = '24.20.0'
+$nodeArchitecture = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') { 'arm64' } else { 'x64' }
+$nodeArchiveName = "node-v$nodeVersion-win-$nodeArchitecture.zip"
+$nodeExpectedSha256 = if ($nodeArchitecture -eq 'arm64') {
+    '31c6799744de8a54601643098040c68c3697e56c94e407d61d0e5fa5f34191d7'
+} else {
+    '6cac9ffbca8f6a47091e4b5c772e0606049c3871cb67d900c0cedde630e545ba'
+}
+$nodeRuntimeRoot = Join-Path $runtimeBase 'node'
+$nodeExecutable = Join-Path $nodeRuntimeRoot 'node.exe'
+$nodeArchive = Join-Path $env:TEMP $nodeArchiveName
 $embeddedRoot = Join-Path $runtimeBase 'Python311'
 $embeddedPython = Join-Path $embeddedRoot 'python.exe'
 $venvRoot = Join-Path $runtimeBase 'venv311'
@@ -66,7 +78,64 @@ function Resolve-BasePython {
     return $null
 }
 
+function Install-PortableNode {
+    if (Test-Path -LiteralPath $nodeExecutable) {
+        $installedVersion = & $nodeExecutable --version
+        if ($LASTEXITCODE -eq 0 -and $installedVersion -eq "v$nodeVersion") {
+            Write-Host "Node.js is ready: $installedVersion"
+            return
+        }
+    }
+
+    if (Test-Path -LiteralPath $nodeArchive) {
+        $existingHash = (Get-FileHash -LiteralPath $nodeArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($existingHash -ne $nodeExpectedSha256) {
+            Remove-Item -LiteralPath $nodeArchive -Force
+        }
+    }
+
+    Write-Host "Downloading Node.js v$nodeVersion LTS ($nodeArchitecture)..."
+    Download-File "https://nodejs.org/dist/v$nodeVersion/$nodeArchiveName" $nodeArchive
+    $downloadedHash = (Get-FileHash -LiteralPath $nodeArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($downloadedHash -ne $nodeExpectedSha256) {
+        Remove-Item -LiteralPath $nodeArchive -Force
+        throw 'Node.js download checksum verification failed. Run this installer again.'
+    }
+
+    $stagingRoot = Join-Path $runtimeBase "node-install-$PID"
+    if (Test-Path -LiteralPath $stagingRoot) {
+        Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $stagingRoot | Out-Null
+    try {
+        Expand-Archive -LiteralPath $nodeArchive -DestinationPath $stagingRoot -Force
+        $extractedRoot = Join-Path $stagingRoot "node-v$nodeVersion-win-$nodeArchitecture"
+        $extractedNode = Join-Path $extractedRoot 'node.exe'
+        if (-not (Test-Path -LiteralPath $extractedNode)) {
+            throw 'The Node.js archive did not contain node.exe.'
+        }
+        if (Test-Path -LiteralPath $nodeRuntimeRoot) {
+            Remove-Item -LiteralPath $nodeRuntimeRoot -Recurse -Force
+        }
+        Move-Item -LiteralPath $extractedRoot -Destination $nodeRuntimeRoot
+    }
+    finally {
+        Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $installedVersion = & $nodeExecutable --version
+    if ($LASTEXITCODE -ne 0 -or $installedVersion -ne "v$nodeVersion") {
+        throw 'Node.js runtime validation failed.'
+    }
+    Write-Host "PASS: Node.js is ready at $nodeExecutable" -ForegroundColor Green
+}
+
 New-Item -ItemType Directory -Force -Path $runtimeBase, $pipCache, $modelCache, $detectorCache | Out-Null
+Install-PortableNode
+if ($NodeOnly) {
+    Write-Host "PASS: Node.js-only setup completed at $nodeExecutable" -ForegroundColor Green
+    exit 0
+}
 $resolvedPython = Resolve-BasePython
 
 if ($resolvedPython) {
@@ -116,5 +185,6 @@ $helpOutput | Select-Object -First 12
 
 Write-Host ''
 Write-Host "PASS: AI runtime is ready at $runtimePython" -ForegroundColor Green
+Write-Host "Node.js runtime: $nodeExecutable"
 Write-Host "MegaDetector model cache: $detectorModel"
 Write-Host "Your photos and results stay in: $runtimeBase"

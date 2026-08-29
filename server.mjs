@@ -1067,7 +1067,7 @@ async function probeAiRuntime(force = false) {
     aiRuntimeStatus = {
       ready: false,
       status: "NOT_INSTALLED",
-      message: "尚未建立 AI Python 環境；請執行安裝AI辨識環境.cmd。",
+      message: "尚未建立本機辨識環境；請執行安裝照片辨識軟體.cmd。",
       pythonPath: config.ai.pythonPath,
     };
     return aiRuntimeStatus;
@@ -1084,17 +1084,13 @@ async function probeAiRuntime(force = false) {
     aiRuntimeStatus = {
       ready: detectorModelReady,
       status: detectorModelReady ? "READY" : "MODEL_MISSING",
-      message: "MegaDetector 與 SpeciesNet 已可使用。",
       pythonPath: config.ai.pythonPath,
       detectorModel: config.ai.detectorModel,
       detectorModelPath: config.ai.detectorModelPath,
       detectorModelReady,
       message: detectorModelReady
         ? "MegaDetector 與 SpeciesNet 已可使用。"
-        : "MegaDetector 權重尚未安裝完整；請重新執行「安裝AI辨識環境.cmd」。",
-      message: detectorModelReady
-        ? "MegaDetector \u8207 SpeciesNet \u5df2\u53ef\u4f7f\u7528\u3002"
-        : "MegaDetector \u6b0a\u91cd\u5c1a\u672a\u5b89\u88dd\u5b8c\u6574\uff1b\u8acb\u91cd\u65b0\u57f7\u884c\u300c\u5b89\u88ddAI\u8fa8\u8b58\u74b0\u5883.cmd\u300d\u3002",
+        : "MegaDetector 權重尚未安裝完整；請重新執行「安裝照片辨識軟體.cmd」。",
       country: config.ai.country,
       versions: { megadetector: versions.megadetector, speciesnet: versions.speciesnet, torch: versions.torch },
       hardware: {
@@ -1975,7 +1971,7 @@ async function createAiJob(event, options = {}) {
     : null;
   if (!detectorModelStat || detectorModelStat.size < 50_000_000) {
     aiRuntimeStatus = null;
-    throw requestError(503, "MegaDetector 權重不存在或下載不完整；請重新執行「安裝AI辨識環境.cmd」後再開始辨識。");
+    throw requestError(503, "MegaDetector 權重不存在或下載不完整；請重新執行「安裝照片辨識軟體.cmd」後再開始辨識。");
   }
   const active = [...aiJobs.values()].find((job) => job.eventId === event.EventID && ["AI_PENDING", "AI_RUNNING"].includes(job.status));
   if (active) return { job: active, created: false };
