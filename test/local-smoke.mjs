@@ -65,6 +65,10 @@ try {
   const config = await configResponse.json();
   assert.equal(config.appName, "相機陷阱本機辨識器");
   assert.ok(!config.workingCsv.includes("CameraTrap_Gold"));
+  assert.ok(!config.workingCsv.includes("%LOCALAPPDATA%"), "Windows environment variables should be expanded");
+  if (process.platform === "win32") {
+    assert.equal(config.workingCsv, path.join(runtimeRoot, "CameraTrapReviewer", "data", "reviewed-events.csv"));
+  }
   assert.deepEqual((await eventsResponse.json()).events, []);
   assert.ok((await taxonomyResponse.json()).taxonomy.length > 0);
 

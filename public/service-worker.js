@@ -1,4 +1,4 @@
-const CACHE_NAME = "camera-trap-reviewer-shell-v3.1.0";
+const CACHE_NAME = "camera-trap-reviewer-shell-v3.1.1";
 const APP_SHELL = [
   "./",
   "./index.html",

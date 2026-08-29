@@ -13,16 +13,17 @@ import { PersistentMegaDetectorWorker } from "./lib/megadetector-worker.mjs";
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_ROOT = path.join(ROOT, "public");
 const config = JSON.parse(await readFile(path.join(ROOT, "config.json"), "utf8"));
+const expandEnvironmentVariables = (value) => String(value || "").replace(/%([^%]+)%/g, (_, name) => process.env[name] || `%${name}%`);
+const resolveConfiguredPath = (value) => path.resolve(ROOT, expandEnvironmentVariables(value));
 
 config.port = Number(process.env.CAMTRAP_PORT || config.port || 4173);
-config.manifestCsv = process.env.CAMTRAP_MANIFEST_CSV || config.manifestCsv;
-config.workingCsv = process.env.CAMTRAP_WORKING_CSV || config.workingCsv;
-config.auditLog = process.env.CAMTRAP_AUDIT_LOG || config.auditLog
-  || path.join(path.dirname(config.workingCsv), `${config.deploymentId}_annotation_audit_v2.0.jsonl`);
-config.mediaRoot = process.env.CAMTRAP_MEDIA_ROOT || config.mediaRoot;
-config.taxonomyJson = path.resolve(ROOT, process.env.CAMTRAP_TAXONOMY_JSON || config.taxonomyJson);
+config.manifestCsv = resolveConfiguredPath(process.env.CAMTRAP_MANIFEST_CSV || config.manifestCsv);
+config.workingCsv = resolveConfiguredPath(process.env.CAMTRAP_WORKING_CSV || config.workingCsv);
+config.auditLog = resolveConfiguredPath(process.env.CAMTRAP_AUDIT_LOG || config.auditLog
+  || path.join(path.dirname(config.workingCsv), `${config.deploymentId}_annotation_audit_v2.0.jsonl`));
+config.mediaRoot = resolveConfiguredPath(process.env.CAMTRAP_MEDIA_ROOT || config.mediaRoot);
+config.taxonomyJson = resolveConfiguredPath(process.env.CAMTRAP_TAXONOMY_JSON || config.taxonomyJson);
 config.ai ||= {};
-const expandEnvironmentVariables = (value) => String(value || "").replace(/%([^%]+)%/g, (_, name) => process.env[name] || `%${name}%`);
 const localRuntimeRoot = process.platform === "win32"
   ? path.join(process.env.LOCALAPPDATA || ROOT, "CameraTrapReviewer")
   : path.join(ROOT, ".camera-trap-reviewer");
@@ -41,7 +42,7 @@ config.ai.pythonPath = existsSync(configuredAiPython)
 config.ai.modelCacheRoot = path.resolve(ROOT, expandEnvironmentVariables(
   process.env.CAMTRAP_AI_MODEL_CACHE || config.ai.modelCacheRoot || path.join(path.dirname(config.ai.pythonPath), "model-cache"),
 ));
-config.ai.jobsRoot = path.resolve(process.env.CAMTRAP_AI_JOBS_ROOT || config.ai.jobsRoot || path.join(ROOT, "ai_jobs"));
+config.ai.jobsRoot = resolveConfiguredPath(process.env.CAMTRAP_AI_JOBS_ROOT || config.ai.jobsRoot || path.join(ROOT, "ai_jobs"));
 config.ai.country = process.env.CAMTRAP_AI_COUNTRY || config.ai.country || "";
 config.ai.detectorModel = process.env.CAMTRAP_AI_DETECTOR_MODEL || config.ai.detectorModel || "MDv1000-redwood";
 config.ai.detectorModelPath = path.resolve(ROOT, expandEnvironmentVariables(
@@ -80,8 +81,8 @@ const REPEAT_DETECTION_IOU = 0.80;
 const REPEAT_DETECTION_MIN_EVENTS = 3;
 const REPEAT_DETECTION_MIN_DAYS = 2;
 
-const configuredWorkingCsv = path.resolve(ROOT, config.workingCsv);
-const configuredAuditLog = path.resolve(ROOT, config.auditLog);
+const configuredWorkingCsv = config.workingCsv;
+const configuredAuditLog = config.auditLog;
 config.workingCsv = configuredWorkingCsv;
 config.auditLog = configuredAuditLog;
 config.storageMode = "configured";
