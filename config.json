@@ -1,11 +1,11 @@
 {
-  "appName": "野生動物辨識成果台",
-  "deploymentId": "CAM023-2026-08-A",
+  "appName": "相機陷阱本機辨識器",
+  "deploymentId": "LOCAL-WORKSPACE",
   "port": 4173,
-  "manifestCsv": "D:\\CameraTrap_Gold_v1\\04_annotations\\CAM023-2026-08-A_gold_annotation_events_v1.0.csv",
-  "workingCsv": "D:\\CameraTrap_Gold_v1\\04_annotations\\CAM023-2026-08-A_gold_annotation_events_v1.0_working.csv",
-  "auditLog": "D:\\CameraTrap_Gold_v1\\04_annotations\\CAM023-2026-08-A_annotation_audit_v2.0.jsonl",
-  "mediaRoot": "D:\\CameraTrap_Gold_v1\\01_annotation_working\\LOC001\\CAM023-2026-08-A",
+  "manifestCsv": "%LOCALAPPDATA%\\CameraTrapReviewer\\data\\source-events.csv",
+  "workingCsv": "%LOCALAPPDATA%\\CameraTrapReviewer\\data\\reviewed-events.csv",
+  "auditLog": "%LOCALAPPDATA%\\CameraTrapReviewer\\data\\annotation-audit.jsonl",
+  "mediaRoot": "%LOCALAPPDATA%\\CameraTrapReviewer\\media",
   "taxonomyJson": "taxonomy.json",
   "allowedBrowserOrigins": [
     "https://nexusintelligent.github.io"
@@ -17,12 +17,12 @@
     "eventGapSeconds": 120
   },
   "ai": {
-    "pythonPath": "%LOCALAPPDATA%\\CameraTrapReviewer\\Python311\\python.exe",
+    "pythonPath": "%LOCALAPPDATA%\\CameraTrapReviewer\\venv311\\Scripts\\python.exe",
     "modelCacheRoot": "%LOCALAPPDATA%\\CameraTrapReviewer\\model-cache",
-    "jobsRoot": "D:\\CameraTrap_Gold_v1\\04_annotations\\ai_jobs_v2",
+    "jobsRoot": "%LOCALAPPDATA%\\CameraTrapReviewer\\ai-jobs",
     "country": "TWN",
     "detectorModel": "MDv1000-redwood",
-    "detectorModelPath": "local-data\\model-cache\\megadetector\\md_v1000.0.0-redwood.pt",
+    "detectorModelPath": "%LOCALAPPDATA%\\CameraTrapReviewer\\model-cache\\megadetector\\md_v1000.0.0-redwood.pt",
     "megadetectorVersion": "10.0.24",
     "speciesnetVersion": "5.0.5",
     "detectionThresholdForClassification": 0.15,

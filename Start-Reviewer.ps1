@@ -17,13 +17,12 @@ try {
     # Server is not running yet; continue with startup.
 }
 
-$bundledNode = 'C:\Users\user\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
 $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
-$nodeExecutable = if ($nodeCommand) { $nodeCommand.Source } elseif (Test-Path -LiteralPath $bundledNode) { $bundledNode } else { $null }
+$nodeExecutable = if ($nodeCommand) { $nodeCommand.Source } else { $null }
 
 if (-not $nodeExecutable) {
     Write-Host '找不到 Node.js，無法啟動照片判讀軟體。' -ForegroundColor Red
-    Write-Host '請安裝 Node.js 20 以上版本，或從 Codex 工作環境啟動。'
+    Write-Host '請安裝 Node.js 20 以上版本後，再重新執行此檔案。'
     Read-Host '按 Enter 關閉'
     exit 1
 }

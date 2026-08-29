@@ -292,8 +292,8 @@ function renderConnectionState() {
   document.body.classList.toggle("connection-warning", !connected);
   $("#offline-title").textContent = online ? "本機服務尚未連線" : "目前處於離線狀態";
   $("#offline-message").textContent = online
-    ? "請先啟動照片辨識軟體，再按「重新連線」。資料與影像不會儲存在 PWA 快取中。"
-    : "PWA 介面可離線開啟，但標註資料與相機影像需要本機服務。";
+    ? "請先啟動本機辨識器，再按「重新連線」。照片、模型與成果只會保留在這台電腦。"
+    : "PWA 介面可離線開啟，但處理照片與執行 AI 仍需要這台電腦上的本機辨識器。";
 }
 
 function initializePwa() {
@@ -1852,6 +1852,9 @@ function initializeControls() {
   });
   for (const dialog of document.querySelectorAll("dialog")) dialog.addEventListener("close", syncModalScrollLock);
   $("#open-import-button").addEventListener("click", () => openModalDialog($("#import-dialog")));
+  $("#open-local-setup-button").addEventListener("click", () => openModalDialog($("#local-setup-dialog")));
+  $("#open-offline-setup-button").addEventListener("click", () => openModalDialog($("#local-setup-dialog")));
+  $("#close-local-setup-button").addEventListener("click", () => closeModalDialog($("#local-setup-dialog")));
   $("#open-import-home-button").addEventListener("click", () => openModalDialog($("#import-dialog")));
   $("#open-import-card-button").addEventListener("click", () => openModalDialog($("#import-dialog")));
   $("#upload-tab").addEventListener("click", () => showView("upload"));
@@ -1973,7 +1976,10 @@ async function start() {
   } catch (error) {
     state.serverAvailable = false;
     renderConnectionState();
-    showToast(`${error.message} 請確認伺服器與 D 槽資料路徑。`, true);
+    const connectionMessage = error instanceof TypeError
+      ? "尚未偵測到本機辨識器。"
+      : error.message;
+    showToast(`${connectionMessage} 請按「查看啟動步驟」完成設定後再重新連線。`, true);
     $("#event-id").textContent = "載入失敗";
   }
 }

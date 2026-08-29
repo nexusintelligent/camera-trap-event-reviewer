@@ -11,7 +11,7 @@ $venvRoot = Join-Path $runtimeBase 'venv311'
 $venvPython = Join-Path $venvRoot 'Scripts\python.exe'
 $pipCache = Join-Path $runtimeBase 'pip-cache'
 $modelCache = Join-Path $runtimeBase 'model-cache'
-$detectorCache = Join-Path $projectRoot 'local-data\model-cache\megadetector'
+$detectorCache = Join-Path $modelCache 'megadetector'
 $detectorModel = Join-Path $detectorCache 'md_v1000.0.0-redwood.pt'
 $requirements = Join-Path $projectRoot 'ai\requirements-ai.txt'
 $pythonZip = Join-Path $env:TEMP 'python-3.11.9-embed-amd64.zip'
@@ -117,3 +117,4 @@ $helpOutput | Select-Object -First 12
 Write-Host ''
 Write-Host "PASS: AI runtime is ready at $runtimePython" -ForegroundColor Green
 Write-Host "MegaDetector model cache: $detectorModel"
+Write-Host "Your photos and results stay in: $runtimeBase"

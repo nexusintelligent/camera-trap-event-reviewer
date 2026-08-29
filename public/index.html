@@ -4,24 +4,24 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#123f2f">
-  <meta name="description" content="上傳相機陷阱照片與影片，以事件為單位查看 AI 辨識成果、人工覆核並匯出資料。">
-  <meta name="application-name" content="野生動物辨識成果台">
+  <meta name="description" content="在使用者自己的電腦上整理相機陷阱影像、執行 AI 初篩、人工覆核與匯出成果。">
+  <meta name="application-name" content="相機陷阱本機辨識器">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="事件判讀台">
-  <title>野生動物辨識成果台</title>
+  <meta name="apple-mobile-web-app-title" content="本機辨識器">
+  <title>相機陷阱本機辨識器</title>
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="./icons/icon-180.png">
-  <link rel="stylesheet" href="./styles.css?v=2.11.1">
+  <link rel="stylesheet" href="./styles.css?v=3.0.0">
 </head>
 <body>
   <header class="topbar">
     <div class="brand-block">
       <div class="brand-mark" aria-hidden="true">CT</div>
       <div class="brand-copy">
-        <div class="eyebrow">CAMERA TRAP · GOLD DATA</div>
-        <h1 id="app-title">野生動物辨識成果台</h1>
+        <div class="eyebrow">CAMERA TRAP · PRIVATE LOCAL AI</div>
+        <h1 id="app-title">相機陷阱本機辨識器</h1>
       </div>
     </div>
     <nav class="primary-tabs" aria-label="主要功能">
@@ -29,7 +29,8 @@
       <button class="primary-tab" id="review-tab" type="button" aria-selected="false">人工覆核</button>
     </nav>
     <div class="top-actions">
-      <button class="button ghost" id="open-import-button" type="button">上傳媒體</button>
+      <button class="button ghost" id="open-local-setup-button" type="button">設定本機辨識器</button>
+      <button class="button ghost" id="open-import-button" type="button">選擇媒體</button>
       <button class="button ghost install-button" id="install-app-button" type="button" hidden>安裝應用程式</button>
       <div class="save-state review-only" id="save-state"><span></span>尚未修改</div>
       <a class="button ghost" id="export-link" href="#">匯出成果 CSV</a>
@@ -40,34 +41,35 @@
   <div class="offline-banner" id="offline-banner" role="status" hidden>
     <div>
       <strong id="offline-title">目前無法連線</strong>
-      <span id="offline-message">請先啟動本機照片辨識服務，資料與影像不會儲存在 PWA 快取中。</span>
+      <span id="offline-message">請先啟動本機辨識器；照片、模型與成果都只保留在這台電腦。</span>
     </div>
+    <button class="button ghost" id="open-offline-setup-button" type="button">查看啟動步驟</button>
     <button class="button ghost" id="retry-connection-button" type="button">重新連線</button>
   </div>
 
   <main class="upload-workspace" id="upload-view">
     <section class="upload-hero">
       <div>
-        <div class="eyebrow">UPLOAD · AI TRIAGE</div>
-        <h2>上傳照片，先完成快速初篩</h2>
-        <p>這裡只負責新增媒體與執行 AI。原有 154 組黃金資料及人工標註工具已移至「人工覆核」分頁。</p>
+        <div class="eyebrow">PRIVATE · LOCAL · AI TRIAGE</div>
+        <h2>照片留在你的電腦，辨識也用你的電腦執行。</h2>
+        <p>從照片或資料夾開始建立自己的工作區；不需要中央後端，也不會與其他使用者共用任何影像或成果。</p>
       </div>
-      <button class="button primary upload-hero-button" id="open-import-home-button" type="button">選擇照片或資料夾</button>
+      <button class="button primary upload-hero-button" id="open-import-home-button" type="button">開始選擇照片</button>
     </section>
 
     <section class="upload-dashboard">
       <article class="upload-card import-launch-card">
-        <div class="card-kicker">01 · 新增媒體</div>
+        <div class="card-kicker">01 · 建立本機工作區</div>
         <h3>從電腦選擇照片與影片</h3>
-        <p>支援單檔、多選或整個資料夾。系統會依檔名與時間整理為事件，原始檔不會被修改。</p>
+        <p>支援單檔、多選或整個資料夾。瀏覽器僅讀取你主動選擇的檔案；原始檔不會被修改。</p>
         <button class="upload-drop-button" id="open-import-card-button" type="button">
           <strong>＋ 上傳媒體</strong>
-          <span>最多約 999 個檔案，可建立三百多組事件</span>
+          <span>照片會複製到這台電腦的私有工作區後再由 AI 處理</span>
         </button>
       </article>
 
       <article class="upload-card ai-triage-card">
-        <div class="card-kicker">02 · AI 快速初篩</div>
+        <div class="card-kicker">02 · 使用本機 AI 初篩</div>
         <div class="triage-heading">
           <div>
             <h3>空觸發或需要辨識物種</h3>
@@ -447,8 +449,8 @@
   <dialog id="import-dialog" class="import-dialog">
     <div class="dialog-head">
       <div>
-        <div class="eyebrow">WEB UPLOAD · V2.6</div>
-        <h2>上傳媒體並建立事件</h2>
+        <div class="eyebrow">LOCAL WORKSPACE · V3.0</div>
+        <h2>選擇媒體並建立事件</h2>
       </div>
       <button id="close-import-dialog" type="button" aria-label="關閉">×</button>
     </div>
@@ -480,7 +482,27 @@
     </div>
   </dialog>
 
+  <dialog id="local-setup-dialog" class="local-setup-dialog">
+    <div class="dialog-head">
+      <div>
+        <div class="eyebrow">ONE-TIME LOCAL SETUP</div>
+        <h2>在這台電腦準備辨識器</h2>
+        <p>網站介面可由 GitHub Pages 開啟；AI、照片、快取與 CSV 則完全留在你自己的電腦。</p>
+      </div>
+      <button class="dialog-close" id="close-local-setup-button" type="button" aria-label="關閉">×</button>
+    </div>
+    <div class="local-setup-body">
+      <ol class="setup-steps">
+        <li><span>1</span><div><strong>第一次使用：安裝 AI</strong><p>在專案資料夾雙擊 <code>安裝AI辨識環境.cmd</code>。它會建立專屬 Python 環境並下載必要模型。</p></div></li>
+        <li><span>2</span><div><strong>啟動本機服務</strong><p>雙擊 <code>啟動照片辨識軟體.cmd</code>。服務只監聽 <code>127.0.0.1:4173</code>，外部電腦無法讀取你的資料。</p></div></li>
+        <li><span>3</span><div><strong>回到這個頁面並重新連線</strong><p>按上方「重新連線」，接著選擇照片或資料夾即可建立獨立工作區。</p></div></li>
+      </ol>
+      <div class="local-privacy-note"><strong>資料位置</strong><span>照片工作副本、AI 模型與匯出成果會放在 <code>%LOCALAPPDATA%\\CameraTrapReviewer</code>。不同使用者、不同電腦之間不會自動同步。</span></div>
+      <p class="setup-support">若啟動失敗，先確認已安裝 Node.js 20 以上版本；再查看專案內的 <code>logs\\server.stderr.log</code>。</p>
+    </div>
+  </dialog>
+
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="./app.js?v=2.11.1"></script>
+  <script type="module" src="./app.js?v=3.0.0"></script>
 </body>
 </html>

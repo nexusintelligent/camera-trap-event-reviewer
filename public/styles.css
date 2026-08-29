@@ -113,6 +113,24 @@ kbd { padding: 1px 4px; font-size: 10px; color: inherit; border: 1px solid curre
 .offline-banner .button { min-height: 32px; padding: 5px 10px; border-color: #c89747; }
 body.connection-warning .sidebar { top: 137px; height: calc(100vh - 137px); }
 
+.local-setup-dialog { width: min(680px, calc(100% - 28px)); padding: 0; color: var(--ink); background: var(--paper); border: 0; border-radius: 18px; box-shadow: 0 30px 80px rgba(13, 30, 21, .34); }
+.local-setup-dialog::backdrop { background: rgba(11, 27, 19, .58); backdrop-filter: blur(3px); }
+.local-setup-dialog .dialog-head { padding: 25px 28px 21px; color: white; background: linear-gradient(125deg, #123f2f, #236549); }
+.local-setup-dialog .dialog-head .eyebrow { color: #cbe3d5; opacity: 1; }
+.local-setup-dialog .dialog-head h2 { margin: 5px 0 6px; font-size: clamp(24px, 4vw, 31px); }
+.local-setup-dialog .dialog-head p { max-width: 540px; margin: 0; color: #d9e8df; font-size: 13px; }
+.local-setup-dialog .dialog-close { color: white; border-color: rgba(255, 255, 255, .36); }
+.local-setup-body { padding: 25px 28px 28px; }
+.setup-steps { margin: 0; padding: 0; display: grid; gap: 15px; list-style: none; }
+.setup-steps li { display: grid; grid-template-columns: 31px minmax(0, 1fr); gap: 12px; align-items: start; }
+.setup-steps li > span { width: 29px; height: 29px; display: grid; place-items: center; color: #e5f4ea; background: var(--forest-2); border-radius: 50%; font-size: 13px; font-weight: 800; }
+.setup-steps strong { display: block; margin: 2px 0 4px; color: #224835; }
+.setup-steps p { margin: 0; color: var(--muted); font-size: 13px; }
+.local-setup-dialog code { padding: 2px 5px; color: #204a35; background: #edf4ef; border: 1px solid #d1e1d5; border-radius: 5px; font-family: Consolas, "Cascadia Code", monospace; font-size: .9em; }
+.local-privacy-note { margin-top: 21px; padding: 13px 15px; display: flex; flex-direction: column; gap: 5px; background: #fff6e7; border: 1px solid #efd49f; border-radius: 10px; color: #67460c; font-size: 13px; }
+.local-privacy-note strong { font-size: 12px; letter-spacing: .04em; }
+.setup-support { margin: 16px 0 0; color: var(--muted); font-size: 12px; }
+
 .upload-workspace { width: min(1240px, calc(100% - 40px)); margin: 0 auto; padding: 34px 0 56px; }
 .upload-hero { min-height: 190px; padding: 30px 34px; display: flex; align-items: center; justify-content: space-between; gap: 32px; color: white; background: linear-gradient(120deg, #154a36, #24684d); border-radius: 18px; box-shadow: var(--shadow); }
 .upload-hero h2 { max-width: 700px; margin: 5px 0 9px; font-size: clamp(28px, 4vw, 44px); line-height: 1.08; }

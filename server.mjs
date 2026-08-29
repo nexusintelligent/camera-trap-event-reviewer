@@ -23,10 +23,21 @@ config.mediaRoot = process.env.CAMTRAP_MEDIA_ROOT || config.mediaRoot;
 config.taxonomyJson = path.resolve(ROOT, process.env.CAMTRAP_TAXONOMY_JSON || config.taxonomyJson);
 config.ai ||= {};
 const expandEnvironmentVariables = (value) => String(value || "").replace(/%([^%]+)%/g, (_, name) => process.env[name] || `%${name}%`);
+const localRuntimeRoot = process.platform === "win32"
+  ? path.join(process.env.LOCALAPPDATA || ROOT, "CameraTrapReviewer")
+  : path.join(ROOT, ".camera-trap-reviewer");
 const defaultAiPython = process.platform === "win32"
-  ? path.join(process.env.LOCALAPPDATA || ROOT, "CameraTrapReviewer", "Python311", "python.exe")
-  : path.join(ROOT, ".venv-ai311", "bin", "python");
-config.ai.pythonPath = path.resolve(ROOT, expandEnvironmentVariables(process.env.CAMTRAP_AI_PYTHON || config.ai.pythonPath || defaultAiPython));
+  ? path.join(localRuntimeRoot, "venv311", "Scripts", "python.exe")
+  : path.join(localRuntimeRoot, "venv-ai311", "bin", "python");
+const embeddedAiPython = process.platform === "win32"
+  ? path.join(localRuntimeRoot, "Python311", "python.exe")
+  : defaultAiPython;
+const configuredAiPython = path.resolve(ROOT, expandEnvironmentVariables(
+  process.env.CAMTRAP_AI_PYTHON || config.ai.pythonPath || defaultAiPython,
+));
+config.ai.pythonPath = existsSync(configuredAiPython)
+  ? configuredAiPython
+  : (existsSync(embeddedAiPython) ? embeddedAiPython : configuredAiPython);
 config.ai.modelCacheRoot = path.resolve(ROOT, expandEnvironmentVariables(
   process.env.CAMTRAP_AI_MODEL_CACHE || config.ai.modelCacheRoot || path.join(path.dirname(config.ai.pythonPath), "model-cache"),
 ));
@@ -434,9 +445,11 @@ function registerEventMedia(event) {
 }
 
 async function loadState() {
-  const sourceText = await readFile(config.manifestCsv, "utf8");
-  const sourceEvents = parseCsv(sourceText);
-  if (!sourceEvents.length) throw new Error(`事件清單為空：${config.manifestCsv}`);
+  // A personal installation starts with no shared manifest.  Existing projects
+  // can still opt in by setting CAMTRAP_MANIFEST_CSV or config.manifestCsv.
+  const sourceEvents = existsSync(config.manifestCsv)
+    ? parseCsv(await readFile(config.manifestCsv, "utf8"))
+    : [];
 
   const eventIds = new Set();
   for (const event of sourceEvents) {

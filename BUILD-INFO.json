@@ -1,14 +1,13 @@
 {
-  "product": "野生動物辨識成果台",
-  "version": "2.6.3",
-  "buildDate": "2026-08-21",
-  "deploymentId": "CAM023-2026-08-A",
-  "eventCount": 154,
-  "mediaCount": 616,
-  "workflow": "batch-separated browser upload, compact AI triage results, MegaDetector/SpeciesNet inference, batch-specific human review and export",
-  "runtime": "Node.js local service plus Python 3.11 AI runtime",
+  "product": "相機陷阱本機辨識器",
+  "version": "3.0.0",
+  "buildDate": "2026-08-30",
+  "deploymentId": "LOCAL-WORKSPACE",
+  "eventCount": 0,
+  "workflow": "private local upload, event grouping, MegaDetector/SpeciesNet inference, manual review and CSV export",
+  "architecture": "GitHub Pages PWA shell plus a per-user Node.js and Python local service",
+  "runtimeDataRoot": "%LOCALAPPDATA%\\CameraTrapReviewer",
   "listenAddress": "127.0.0.1",
-  "inferenceAvailable": true,
   "ai": {
     "megadetector": "10.0.24",
     "detectorModel": "MDv1000-redwood",
@@ -17,31 +16,14 @@
   },
   "automatedChecks": [
     "JavaScript syntax",
-    "154-event manifest load",
-    "AI runtime status and protected job API",
-    "two end-to-end photo/video inference jobs on a test CSV copy",
-    "media byte-range streaming",
-    "taxonomy load",
-    "v2.1 annotation validation",
-    "immutable AI field rejection",
-    "CSV export",
-    "PWA shell-only cache policy",
-    "path traversal rejection",
-    "web upload manifest validation",
-    "server-side SHA-256 and media signature validation",
-    "automatic web event persistence",
-    "import-batch separation and deterministic review filters"
+    "empty local workspace startup",
+    "local API and GitHub Pages CORS",
+    "web upload media signature validation",
+    "automatic event creation and CSV export"
   ],
   "browserChecks": [
-    "event media rendered",
-    "multi-label human review",
-    "separate AI result panel and run control",
-    "file and folder upload dialog",
-    "client and server SHA-256 validation",
-    "automatic event creation and compact result refresh",
-    "batch-specific manual review with AI-result content filters",
-    "whole-sidebar scrolling with always-visible filters and modal background containment",
-    "responsive layout",
-    "no browser console errors"
+    "private-local landing screen",
+    "responsive upload dashboard",
+    "local setup and recovery guidance"
   ]
 }
