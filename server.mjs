@@ -9,6 +9,8 @@ import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { parseCsv, stringifyCsv } from "./lib/csv.mjs";
 import { PersistentMegaDetectorWorker } from "./lib/megadetector-worker.mjs";
+import { PerformanceStore } from "./lib/performance-store.mjs";
+import { importOptions, photoEntries, fastPhotoEntries, eventMediaEntries, shouldUseVideo } from "./public/media-options.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_ROOT = path.join(ROOT, "public");
@@ -138,7 +140,7 @@ config.ai.cacheRoot = path.join(config.ai.jobsRoot, "cache");
 config.ai.detectionCacheRoot = path.join(config.ai.cacheRoot, "detections");
 config.ai.thumbnailCacheRoot = path.join(config.ai.cacheRoot, "thumbnails");
 config.ai.videoPreviewCacheRoot = path.join(config.ai.cacheRoot, "video-previews");
-config.ai.performanceFile = path.join(config.ai.cacheRoot, "last-fast-performance.json");
+config.ai.performanceFile = path.join(config.ai.cacheRoot, "batch-performance.json");
 await mkdir(config.ai.detectionCacheRoot, { recursive: true });
 await mkdir(config.ai.thumbnailCacheRoot, { recursive: true });
 await mkdir(config.ai.videoPreviewCacheRoot, { recursive: true });
@@ -177,7 +179,7 @@ await prepareWritableWebUploadStorage();
 const IMMUTABLE_FIELDS = [
   "DeploymentID", "EventID", "EventTime", "SamplingStratum", "AuditRandom",
   "ChallengeReasons", "ImportantSpeciesStatus", "SourceType", "SourceRelativePaths", "MediaSha256",
-  "Photo1", "Photo2", "Photo3", "Video",
+  "Photo1", "Photo2", "Photo3", "Video", "PhotoFiles", "PhotosPerEvent", "IncludeVideos",
 ];
 const AI_FIELDS = [
   "AIStatus", "AIEventLabels", "AISpecies", "AISpeciesConfidence", "AIConfidence", "AIModelName",
@@ -251,14 +253,8 @@ const fastAiWorker = new PersistentMegaDetectorWorker({
   batchSize: config.ai.workerBatchSize,
   cwd: ROOT,
 });
-let lastFastPerformance = null;
-if (existsSync(config.ai.performanceFile)) {
-  try {
-    lastFastPerformance = JSON.parse(await readFile(config.ai.performanceFile, "utf8"));
-  } catch {
-    lastFastPerformance = null;
-  }
-}
+const performanceStore = new PerformanceStore(config.ai.performanceFile);
+await performanceStore.load();
 const SPECIES_RESULT_VERSION = "species-result-v2.1";
 const CHINESE_TAXON_NAMES = new Map(Object.entries({
   "animal": "未知動物（待人工確認）",
@@ -348,15 +344,16 @@ function textResponse(response, statusCode, body, type = "text/plain; charset=ut
 function publicEvent(event) {
   const result = {};
   for (const field of ALL_FIELDS) result[field] = event[field] ?? "";
+  for (const { field, token } of photoEntries(event)) result[field] = token;
   result.media = Object.fromEntries(
-    ["Photo1", "Photo2", "Photo3", "Video"].map((field) => [
+    eventMediaEntries(event).map(({ field, token }) => [
       field,
-      event[field] ? `/media/${encodeURIComponent(event[field])}` : "",
+      `/media/${encodeURIComponent(token)}`,
     ]),
   );
   result.thumbnails = Object.fromEntries(
-    ["Photo1", "Photo2", "Photo3"].map((field) => {
-      const sha256 = mediaShaForToken(event, event[field]);
+    photoEntries(event).map(({ field, token }) => {
+      const sha256 = mediaShaForToken(event, token);
       const thumbnail = sha256 ? path.join(config.ai.thumbnailCacheRoot, `${sha256}.jpg`) : "";
       return [field, thumbnail && existsSync(thumbnail) ? `/thumbnail/${sha256}.jpg` : ""];
     }),
@@ -429,8 +426,7 @@ function pathInside(root, relativePath) {
 }
 
 function registerEventMedia(event) {
-  for (const field of ["Photo1", "Photo2", "Photo3", "Video"]) {
-    const token = event[field];
+  for (const { token } of eventMediaEntries(event)) {
     if (!token) continue;
     if (event._source === "web") {
       const normalized = String(token).replace(/\\/g, "/");
@@ -632,6 +628,7 @@ function validateImportManifest(body) {
     const filename = path.posix.basename(relativePath);
     const extension = path.extname(filename).toLowerCase();
     if (!UPLOAD_EXTENSIONS.has(extension)) throw requestError(400, `不支援的媒體格式：${filename}`);
+    if (body.includeVideos === false && VIDEO_EXTENSIONS.has(extension)) throw requestError(400, "已選擇不辨識影片，匯入清單只能包含照片。");
     const size = Number(raw.size);
     if (!Number.isSafeInteger(size) || size <= 0) throw requestError(400, `檔案大小格式錯誤：${filename}`);
     if (size > config.webUploads.maxFileBytes) throw requestError(413, `檔案超過單檔上限：${filename}`);
@@ -668,6 +665,7 @@ function publicImportSession(session) {
     uploadedCount: session.media.filter((item) => item.uploaded).length,
     totalBytes: session.totalBytes,
     eventIds: session.eventIds || [],
+    ...importOptions(session),
   };
 }
 
@@ -702,11 +700,14 @@ async function cancelImportSession(session) {
 }
 
 async function createImportSession(body) {
+  let options;
+  try { options = importOptions(body); } catch (error) { throw requestError(400, error.message); }
   const media = validateImportManifest(body);
   const importId = `IMP-${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
   const sourceLabel = normalizedDeploymentLabel(body.deploymentName);
   const deploymentId = `${sourceLabel}-${importId.slice(-8)}`;
   const session = {
+    ...options,
     schemaVersion: "2.1",
     importId,
     deploymentId,
@@ -785,7 +786,8 @@ async function receiveImportFile(request, session, index) {
   }
 }
 
-function groupImportedMedia(media) {
+function groupImportedMedia(media, options = {}) {
+  const { photosPerEvent, includeVideos } = importOptions(options);
   const sorted = [...media].sort((left, right) => {
     const leftFolder = path.posix.dirname(left.relativePath);
     const rightFolder = path.posix.dirname(right.relativePath);
@@ -798,6 +800,7 @@ function groupImportedMedia(media) {
   let current = [];
   const flush = () => { if (current.length) groups.push(current); current = []; };
   for (const item of sorted) {
+    if (!includeVideos && VIDEO_EXTENSIONS.has(item.extension)) continue;
     const folder = path.posix.dirname(item.relativePath);
     const previous = current.at(-1);
     const photoCount = current.filter((entry) => IMAGE_EXTENSIONS.has(entry.extension)).length;
@@ -808,8 +811,7 @@ function groupImportedMedia(media) {
     const startNew = current.length > 0 && (
       path.posix.dirname(previous.relativePath) !== folder
       || gapSeconds > config.webUploads.eventGapSeconds
-      || current.length >= 4
-      || (IMAGE_EXTENSIONS.has(item.extension) && photoCount >= 3)
+      || (IMAGE_EXTENSIONS.has(item.extension) && photoCount >= photosPerEvent)
       || (VIDEO_EXTENSIONS.has(item.extension) && videoCount >= 1)
     );
     if (startNew) flush();
@@ -820,7 +822,8 @@ function groupImportedMedia(media) {
 }
 
 function importedEventFromGroup(session, group, index) {
-  const photos = group.filter((item) => IMAGE_EXTENSIONS.has(item.extension)).slice(0, 3);
+  const { photosPerEvent, includeVideos } = importOptions(session);
+  const photos = group.filter((item) => IMAGE_EXTENSIONS.has(item.extension));
   const video = group.find((item) => VIDEO_EXTENSIONS.has(item.extension));
   const source = Object.fromEntries(ALL_FIELDS.map((field) => [field, ""]));
   source.DeploymentID = session.deploymentId;
@@ -828,13 +831,16 @@ function importedEventFromGroup(session, group, index) {
   source.EventTime = group.map((item) => item.lastModified).filter(Boolean).sort()[0] || session.createdAt;
   source.SamplingStratum = "web_upload";
   source.AuditRandom = "0";
-  source.ChallengeReasons = photos.length === 3 && video ? "" : "incomplete_pairing";
+  source.ChallengeReasons = photos.length === photosPerEvent && (!includeVideos || video) ? "" : "incomplete_pairing";
   source.SourceType = "web_upload";
   source.SourceRelativePaths = group.map((item) => item.relativePath).join(";");
   source.MediaSha256 = group.map((item) => `${item.filename}=${item.serverSha256}`).join(";");
   source.Photo1 = photos[0]?.mediaToken || "";
   source.Photo2 = photos[1]?.mediaToken || "";
   source.Photo3 = photos[2]?.mediaToken || "";
+  source.PhotoFiles = JSON.stringify(photos.map((item) => item.mediaToken));
+  source.PhotosPerEvent = String(photosPerEvent);
+  source.IncludeVideos = includeVideos ? "yes" : "no";
   source.Video = video?.mediaToken || "";
   source.AIStatus = "AI_PENDING";
   source.ReviewStatus = "NEEDS_REVIEW";
@@ -847,7 +853,7 @@ async function finalizeImportSession(session) {
   if (session.status === "COMPLETE") return session;
   const missing = session.media.filter((item) => !item.uploaded);
   if (missing.length) throw requestError(409, `仍有 ${missing.length} 個檔案尚未上傳完成。`);
-  const groups = groupImportedMedia(session.media);
+  const groups = groupImportedMedia(session.media, session);
   if (!groups.length) throw requestError(400, "沒有可建立的事件。");
   const importedEvents = groups.map((group, index) => importedEventFromGroup(session, group, index));
   const existingIds = new Set(events.map((event) => event.EventID));
@@ -1298,6 +1304,7 @@ function applyAiSummaryToEvent(event, summary, { identifySpecies = false, mode =
     `MegaDetector ${config.ai.megadetectorVersion} (${config.ai.detectorModel})`,
     identifySpecies ? `SpeciesNet ${config.ai.speciesnetVersion}` : "SpeciesNet skipped",
     `mode=${mode}`,
+    mode === "full" ? `media=all-photos; video=${shouldUseVideo(event) ? "yes" : "no"}` : "",
     `species=${identifySpecies ? "yes" : "no"}`,
     identifySpecies ? SPECIES_RESULT_VERSION : "",
     architecture,
@@ -1332,6 +1339,7 @@ async function reclassifyCachedSpeciesResults(candidates, mode = "fast") {
   let updated = 0;
   for (const event of candidates) {
     const modelVersion = String(event.AIModelVersion || "");
+    if (mode === "full" && shouldUseVideo(event) && !modelVersion.includes("video=yes")) continue;
     if (!modelVersion.includes("species=yes") || !modelVersion.includes(`mode=${mode}`)) continue;
     const prefix = `AI-${event.EventID}-`;
     const matchingDirectories = directories.filter((name) => name.startsWith(prefix));
@@ -1378,11 +1386,9 @@ async function waitForAiQueueResume() {
 
 async function stageEventMedia(event, inputRoot, mode = "full", identifySpecies = false) {
   await mkdir(inputRoot, { recursive: true });
-  const fields = mode === "fast"
-    ? ["Photo1", "Photo3"]
-    : (identifySpecies ? ["Photo1", "Photo2", "Photo3", "Video"] : ["Photo1", "Photo2", "Photo3"]);
-  for (const field of fields) {
-    const filename = event[field];
+  const entries = mode === "fast" ? fastPhotoEntries(event)
+    : [...photoEntries(event), ...(shouldUseVideo(event) ? [{ field: "Video", token: event.Video }] : [])];
+  for (const { field, token: filename } of entries) {
     if (!filename) continue;
     const source = mediaPaths.get(filename);
     if (!source) throw new Error(`拒絕未知媒體：${filename}`);
@@ -1404,7 +1410,7 @@ async function stageEventMedia(event, inputRoot, mode = "full", identifySpecies 
 }
 
 async function fastMediaItem(event, field) {
-  const token = event[field];
+  const token = photoEntries(event).find((item) => item.field === field)?.token;
   if (!token) return null;
   const source = mediaPaths.get(token);
   if (!source) throw new Error(`拒絕未知媒體：${token}`);
@@ -1617,7 +1623,7 @@ async function refreshRepeatDetectionCandidatesFromCache() {
   const referencesByEvent = new Map(entries.map(({ event }) => [event.EventID, []]));
   const detectionsByCacheKey = new Map();
   for (const { event } of entries) {
-    for (const field of ["Photo1", "Photo3"]) {
+    for (const { field } of fastPhotoEntries(event)) {
       const item = await fastMediaItem(event, field);
       if (!item) continue;
       const cached = await readDetectionCache(item);
@@ -1637,20 +1643,13 @@ async function refreshRepeatDetectionCandidatesFromCache() {
   return result;
 }
 
-async function persistFastPerformance(performance) {
-  lastFastPerformance = performance;
-  const temporary = `${config.ai.performanceFile}.tmp-${process.pid}-${Date.now()}`;
-  await writeFile(temporary, JSON.stringify(performance, null, 2), "utf8");
-  await rename(temporary, config.ai.performanceFile);
-}
-
 function fastJobMessage(event) {
   if (event.AIEventLabels.includes("animal")) return "完成：偵測到動物；快速模式未執行物種辨識";
   if (event.AIEventLabels === "empty") return "完成：空觸發";
   return "完成：非空觸發（人／車）";
 }
 
-async function runFastAiBatch(entries) {
+async function runFastAiBatch(entries, run) {
   const activeEntries = entries.filter(({ job }) => !job.cancelRequested);
   if (!activeEntries.length) return;
   const totalStarted = performance.now();
@@ -1660,7 +1659,7 @@ async function runFastAiBatch(entries) {
     const collectStarted = performance.now();
     const references = [];
     for (const { event } of activeEntries) {
-      for (const field of ["Photo1", "Photo3"]) {
+      for (const { field } of fastPhotoEntries(event)) {
         const item = await fastMediaItem(event, field);
         if (item) references.push(item);
       }
@@ -1702,13 +1701,30 @@ async function runFastAiBatch(entries) {
     let cacheWriteSeconds = 0;
     let applySeconds = 0;
     let persistSeconds = 0;
+    let processedPhotos = 0;
+    const updateReport = () => performanceStore.update(run, {
+      processedPhotos, inferredPhotos: Number(workerMetrics.photos || 0),
+      detectionCacheHits: uniqueByCacheKey.size - missingItems.length,
+      uniquePhotos: uniqueByCacheKey.size,
+      modelLoadCountThisBatch: missingItems.length && !workerWasRunning ? 1 : 0,
+      pythonSubprocessesCreated: missingItems.length && !workerWasRunning ? 1 : 0,
+      workerModelLoadCount: Number(workerMetrics.modelLoadCount || 0),
+      device: workerMetrics.device, cudaAvailable: workerReady.cudaAvailable,
+      timingsSeconds: {
+        collect: collectSeconds, cacheRead: cacheReadSeconds, workerStartup: workerStartupSeconds,
+        decode: workerMetrics.decodeSeconds, thumbnails: workerMetrics.thumbnailSeconds,
+        inference: workerMetrics.inferenceSeconds, cacheWrite: cacheWriteSeconds,
+        applyResults: applySeconds, persist: persistSeconds,
+      },
+    });
+    updateReport();
 
     // Keep one Python process and one loaded model, but commit one event at a
     // time.  A 500-photo CPU request can otherwise look frozen for 40+ minutes
     // because the worker returns only after the whole request is complete.
     for (let index = 0; index < activeEntries.length; index += 1) {
       const { job, event } = activeEntries[index];
-      await waitForAiQueueResume();
+      await performanceStore.waiting(run, waitForAiQueueResume);
       if (job.cancelRequested || job.status === "CANCELLED") {
         job.status = "CANCELLED";
         job.finishedAt ||= new Date().toISOString();
@@ -1718,12 +1734,13 @@ async function runFastAiBatch(entries) {
 
       job.status = "AI_RUNNING";
       job.startedAt ||= new Date().toISOString();
-      job.message = `快速模式：正在辨識第 ${index + 1} / ${activeEntries.length} 組的第 1、3 張照片…`;
+      job.message = `快速模式：正在辨識第 ${index + 1} / ${activeEntries.length} 組的首尾照片…`;
       event.AIStatus = "AI_RUNNING";
       event.AIError = "";
 
       try {
         const eventItems = referencesByEvent.get(event.EventID) || [];
+        if (!eventItems.length) throw new Error("此事件只有影片；請使用完整模式辨識。");
         const eventMissingByCacheKey = new Map();
         for (const item of eventItems) {
           if (!detectionsByCacheKey.has(item.cacheKey)) eventMissingByCacheKey.set(item.cacheKey, item);
@@ -1784,6 +1801,7 @@ async function runFastAiBatch(entries) {
           });
           job.status = "AI_COMPLETE";
           job.message = fastJobMessage(event);
+          processedPhotos += eventItems.length;
           applySeconds += (performance.now() - eventApplyStarted) / 1000;
         }
       } catch (error) {
@@ -1799,6 +1817,8 @@ async function runFastAiBatch(entries) {
         saveQueue = saveQueue.then(() => persistEvent(event), () => persistEvent(event));
         await saveQueue;
         persistSeconds += (performance.now() - eventPersistStarted) / 1000;
+        updateReport();
+        await performanceStore.persist();
       }
     }
 
@@ -1854,7 +1874,15 @@ async function runFastAiBatch(entries) {
       averageSecondsPerRequestedPhoto: requestedPhotos ? Number((totalSeconds / requestedPhotos).toFixed(4)) : 0,
       averageInferenceSecondsPerPhoto: inferredPhotos ? Number((Number(workerMetrics.inferenceSeconds || 0) / inferredPhotos).toFixed(4)) : 0,
     };
-    await persistFastPerformance(performanceReport);
+    updateReport();
+    // Keep detailed Worker diagnostics while leaving run identity, live counts
+    // and elapsed time under the shared batch performance store.
+    delete performanceReport.timingsSeconds.total;
+    performanceStore.update(run, {
+      ...performanceReport, completedAt: undefined, schemaVersion: 2,
+      processedPhotos,
+    });
+    await performanceStore.persist();
   } catch (error) {
     for (const { job, event } of activeEntries) {
       if (["AI_COMPLETE", "CANCELLED", "FAILED"].includes(job.status)) continue;
@@ -1873,7 +1901,7 @@ async function runFastAiBatch(entries) {
   }
 }
 
-async function runAiJob(job, event) {
+async function runAiJob(job, event, run) {
   if (job.cancelRequested) {
     job.status = "CANCELLED";
     job.finishedAt = new Date().toISOString();
@@ -1883,6 +1911,8 @@ async function runAiJob(job, event) {
   job.status = "AI_RUNNING";
   job.startedAt = new Date().toISOString();
   job.message = "正在準備事件媒體…";
+  const timingsSeconds = {};
+  let processStarted;
   event.AIStatus = "AI_RUNNING";
   event.AIError = "";
   saveQueue = saveQueue.then(() => persistEvent(event), () => persistEvent(event));
@@ -1896,37 +1926,53 @@ async function runAiJob(job, event) {
     const kaggleCacheRoot = path.join(config.ai.modelCacheRoot, "kagglehub");
     await mkdir(kaggleCacheRoot, { recursive: true });
     const identifySpecies = Boolean(job.identifySpecies);
+    const prepareStarted = performance.now();
     await stageEventMedia(event, inputRoot, job.mode, identifySpecies);
-    const fastMode = job.mode === "fast";
+    timingsSeconds.prepare = (performance.now() - prepareStarted) / 1000;
     job.message = identifySpecies
-      ? (fastMode
-        ? "快速模式：判斷空觸發，動物事件繼續辨識物種…"
-        : "完整模式：判斷空觸發，動物事件繼續辨識物種與影片…")
-      : (fastMode
-        ? "快速初篩中：只判斷第 1、3 張照片是否為空觸發…"
-        : "完整初篩中：以三張照片判斷是否為空觸發…");
-    const args = !identifySpecies
+      ? "完整模式：辨識整組照片與已選影片，並辨識物種…"
+      : "完整模式：辨識整組照片與已選影片中的動物、人與車輛…";
+    const metricsFile = path.join(jobRoot, "performance.json");
+    const photoInputRoot = path.join(jobRoot, "photo-input");
+    const inferenceArgs = !identifySpecies
       ? [
         "-m", "megadetector.detection.run_detector_batch",
-        config.ai.detectorModelPath, inputRoot, resultFile,
+        config.ai.detectorModelPath, photoInputRoot, resultFile,
         "--recursive", "--output_relative_filenames", "--include_max_conf",
         "--threshold", String(config.ai.detectionThresholdForClassification),
         "--ncores", "2",
       ]
       : [
         "-m", "megadetector.detection.run_md_and_speciesnet",
-        inputRoot, resultFile,
+        photoInputRoot, resultFile,
         "--detector_model", config.ai.detectorModelPath,
         "--detection_confidence_threshold_for_classification", String(config.ai.detectionThresholdForClassification),
         "--detection_confidence_threshold_for_output", String(config.ai.detectionThresholdForOutput),
         "--time_sample", String(config.ai.timeSampleSeconds),
         "--include_raw_classifications",
       ];
-    if (identifySpecies && config.ai.country) args.push("--country", config.ai.country);
+    if (identifySpecies && config.ai.country) inferenceArgs.push("--country", config.ai.country);
+    const args = [path.join(ROOT, "scripts", "full_inference.py"),
+      "--input", inputRoot, "--photos", photoInputRoot, "--metrics", metricsFile,
+      "--time-sample", String(config.ai.timeSampleSeconds), "--", ...inferenceArgs];
+    processStarted = performance.now();
+    performanceStore.add(run, { pythonSubprocessesCreated: 1 });
     const processResult = await runProcess(config.ai.pythonPath, args, {
       env: { KAGGLEHUB_CACHE: kaggleCacheRoot },
       onOutput: (chunk) => { job.log = `${job.log || ""}${chunk}`.slice(-100_000); },
     });
+    timingsSeconds.pipeline = (performance.now() - processStarted) / 1000;
+    processStarted = null;
+    if (existsSync(metricsFile)) {
+      const metrics = JSON.parse(await readFile(metricsFile, "utf8"));
+      performanceStore.add(run, {
+        videosOpened: metrics.videosOpened || 0, videoFramesDecoded: metrics.videoFramesDecoded || 0,
+        inferredPhotos: processResult.code === 0 ? photoEntries(event).length : 0,
+      });
+      if (metrics.device) performanceStore.update(run, { device: metrics.device, cudaAvailable: metrics.cudaAvailable });
+      timingsSeconds.videoDecode = metrics.videoDecodeSeconds || 0;
+      timingsSeconds.pipelineInference = metrics.inferenceSeconds || 0;
+    }
     await writeFile(path.join(jobRoot, "inference.log"), `${processResult.stdout}\n${processResult.stderr}`, "utf8");
     if (job.cancelRequested) {
       job.status = "CANCELLED";
@@ -1935,6 +1981,7 @@ async function runAiJob(job, event) {
     }
     if (processResult.code !== 0) throw new Error(processResult.stderr.slice(-2000) || `AI 程序結束碼 ${processResult.code}`);
     const rawResult = JSON.parse(await readFile(resultFile, "utf8"));
+    const applyStarted = performance.now();
     const summary = summarizeAiResult(rawResult, config.ai.detectionThresholdForClassification);
     applyAiSummaryToEvent(event, summary, { identifySpecies, mode: job.mode });
     job.status = "AI_COMPLETE";
@@ -1946,6 +1993,8 @@ async function runAiJob(job, event) {
         ? (summary.reclassifiedFromAnimal ? "SpeciesNet 未確認動物，改列空觸發" : "空觸發")
         : "非空觸發（人／車）");
     job.message = `完成：${triage}`;
+    timingsSeconds.applyResults = (performance.now() - applyStarted) / 1000;
+    performanceStore.add(run, { processedPhotos: photoEntries(event).length });
   } catch (error) {
     if (job.cancelRequested) {
       job.status = "CANCELLED";
@@ -1959,11 +2008,36 @@ async function runAiJob(job, event) {
       job.message = "AI 推論失敗；人工答案未被修改。";
     }
   } finally {
+    if (processStarted) timingsSeconds.pipeline = (performance.now() - processStarted) / 1000;
     job.finishedAt = new Date().toISOString();
     event.SchemaVersion = "2.1";
+    const persistStarted = performance.now();
     saveQueue = saveQueue.then(() => persistEvent(event), () => persistEvent(event));
     await saveQueue;
+    timingsSeconds.persist = (performance.now() - persistStarted) / 1000;
+    performanceStore.add(run, { timingsSeconds });
+    await performanceStore.persist();
   }
+}
+
+function scheduleAiEntries(entries, mode, identifySpecies) {
+  if (!entries.length) return;
+  const run = performanceStore.create(entries, mode, identifySpecies, {
+    photos: entries.reduce((sum, { event }) => sum + (mode === "fast" ? fastPhotoEntries(event) : photoEntries(event)).length, 0),
+    videos: mode === "fast" ? 0 : entries.filter(({ event }) => shouldUseVideo(event)).length,
+  });
+  const execute = async () => {
+    await waitForAiQueueResume();
+    performanceStore.start(run);
+    try {
+      if (mode === "fast") await runFastAiBatch(entries, run);
+      else for (const { job, event } of entries) {
+        await performanceStore.waiting(run, waitForAiQueueResume);
+        await runAiJob(job, event, run);
+      }
+    } finally { await performanceStore.finish(run); }
+  };
+  aiRunQueue = aiRunQueue.then(execute, execute).catch((error) => console.error("AI batch failed", error));
 }
 
 async function createAiJob(event, options = {}) {
@@ -1992,17 +2066,7 @@ async function createAiJob(event, options = {}) {
   };
   aiJobs.set(job.jobId, job);
   if (options.deferSchedule) return { job, created: true };
-  setImmediate(() => {
-    aiRunQueue = aiRunQueue
-      .then(async () => {
-        await waitForAiQueueResume();
-        return mode === "fast" ? runFastAiBatch([{ job, event }]) : runAiJob(job, event);
-      }, async () => {
-        await waitForAiQueueResume();
-        return mode === "fast" ? runFastAiBatch([{ job, event }]) : runAiJob(job, event);
-      })
-      .catch((error) => console.error("AI job failed", error));
-  });
+  scheduleAiEntries([{ job, event }], mode, identifySpecies);
   return { job, created: true };
 }
 
@@ -2013,6 +2077,7 @@ function hasCurrentAiTriage(event) {
 function isCompleteForAiPreference(event, identifySpecies = false, mode = "fast") {
   if (!hasCurrentAiTriage(event)) return false;
   if (mode === "full" && !String(event.AIModelVersion || "").includes("mode=full")) return false;
+  if (mode === "full" && shouldUseVideo(event) && !String(event.AIModelVersion || "").includes("video=yes")) return false;
   if (!identifySpecies) return true;
   const labels = String(event.AIEventLabels || "").split(";");
   if (!labels.includes("animal")) return true;
@@ -2054,19 +2119,20 @@ function aiBatchStatus(identifySpecies = aiBatchPreference.identifySpecies, mode
     remaining: workspace.length - complete,
     queued: activeJobs.filter((job) => job.status === "AI_PENDING").length,
     running: activeJobs.filter((job) => job.status === "AI_RUNNING").length,
-    active: activeJobs.length > 0,
-    globalActive: globalActiveJobs.length > 0,
+    active: activeJobs.length > 0 || performanceStore.isActive(deploymentId),
+    globalActive: globalActiveJobs.length > 0 || performanceStore.isActive(),
     paused: aiQueuePaused,
     currentEventId: runningJob?.eventId || "",
     identifySpecies: Boolean(identifySpecies),
     mode,
     deploymentId,
-    performance: lastFastPerformance,
+    performance: performanceStore.get(deploymentId, mode, identifySpecies),
     worker: fastAiWorker.publicStatus(),
   };
 }
 
 async function createAiBatch(mode = "fast", identifySpecies = false, deploymentId = "") {
+  if (performanceStore.isActive()) throw requestError(409, "已有辨識工作正在執行，請等待完成後再開始。");
   const normalizedMode = normalizeAiMode(mode, "fast");
   const requestedSpecies = normalizeIdentifySpecies(identifySpecies, false);
   const normalizedSpecies = normalizedMode === "fast" ? false : requestedSpecies;
@@ -2084,32 +2150,20 @@ async function createAiBatch(mode = "fast", identifySpecies = false, deploymentI
   candidates = workspace.filter((event) => !isCompleteForAiPreference(event, normalizedSpecies, normalizedMode));
   let created = 0;
   let alreadyQueued = 0;
-  const fastEntries = [];
+  const queuedEntries = [];
   for (const event of candidates) {
     const result = await createAiJob(event, {
       mode: normalizedMode,
       identifySpecies: normalizedSpecies,
-      deferSchedule: normalizedMode === "fast",
+      deferSchedule: true,
     });
     if (result.created) {
       created += 1;
-      if (normalizedMode === "fast") fastEntries.push({ job: result.job, event });
+      queuedEntries.push({ job: result.job, event });
     }
     else alreadyQueued += 1;
   }
-  if (fastEntries.length) {
-    setImmediate(() => {
-      aiRunQueue = aiRunQueue
-        .then(async () => {
-          await waitForAiQueueResume();
-          return runFastAiBatch(fastEntries);
-        }, async () => {
-          await waitForAiQueueResume();
-          return runFastAiBatch(fastEntries);
-        })
-        .catch((error) => console.error("Fast AI batch failed", error));
-    });
-  }
+  scheduleAiEntries(queuedEntries, normalizedMode, normalizedSpecies);
   return {
     created,
     alreadyQueued,
@@ -2140,6 +2194,7 @@ function cancelWorkspaceAiJobs(deploymentId = "") {
 async function resetAiWorkspace(deploymentId) {
   const selectedBatch = requireWebWorkspaceBatch(deploymentId);
   deploymentId = selectedBatch.deploymentId;
+  await performanceStore.remove(deploymentId);
   const workspace = selectedBatch.workspace;
   const cancelled = cancelWorkspaceAiJobs(deploymentId);
   const aiDrivenReviewStatuses = new Set(["AI_PENDING", "AI_RUNNING", "AI_COMPLETE", "NEEDS_REVIEW", "CONFLICT", "FAILED"]);
@@ -2155,13 +2210,14 @@ async function resetAiWorkspace(deploymentId) {
 async function clearWebWorkspace(deploymentId) {
   const selectedBatch = requireWebWorkspaceBatch(deploymentId);
   deploymentId = selectedBatch.deploymentId;
+  await performanceStore.remove(deploymentId);
   const workspace = selectedBatch.workspace;
   const removed = workspace.length;
   const cancelled = cancelWorkspaceAiJobs(deploymentId);
   const importIds = new Set();
   for (const event of workspace) {
-    for (const field of ["Photo1", "Photo2", "Photo3", "Video"]) {
-      const importId = String(event[field] || "").replaceAll("\\", "/").split("/")[0];
+    for (const { token } of eventMediaEntries(event)) {
+      const importId = String(token).replaceAll("\\", "/").split("/")[0];
       if (/^IMP-[A-Za-z0-9-]+$/.test(importId)) importIds.add(importId);
     }
   }
@@ -2238,6 +2294,7 @@ const server = http.createServer(async (request, response) => {
         schemaVersion: "2.1",
         webUpload: {
           enabled: true,
+          importOptionsVersion: 1,
           storageMode: config.webUploads.storageMode,
           storageNotice: config.webUploads.storageNotice,
           maxFilesPerImport: config.webUploads.maxFilesPerImport,
@@ -2260,14 +2317,14 @@ const server = http.createServer(async (request, response) => {
         runtime: await probeAiRuntime(url.searchParams.get("refresh") === "1"),
         activeJobs: [...aiJobs.values()].filter((job) => ["AI_PENDING", "AI_RUNNING"].includes(job.status)).map(publicAiJob),
         worker: fastAiWorker.publicStatus(),
-        performance: lastFastPerformance,
+        performance: performanceStore.get(url.searchParams.get("deploymentId") || "", normalizeAiMode(url.searchParams.get("mode"), "fast"), normalizeIdentifySpecies(url.searchParams.get("identifySpecies"), false)),
       });
     } else if (request.method === "GET" && url.pathname === "/api/ai/performance") {
       jsonResponse(response, 200, {
         ok: true,
         runtime: await probeAiRuntime(),
         worker: fastAiWorker.publicStatus(),
-        performance: lastFastPerformance,
+        performance: performanceStore.get(url.searchParams.get("deploymentId") || "", normalizeAiMode(url.searchParams.get("mode"), "fast"), normalizeIdentifySpecies(url.searchParams.get("identifySpecies"), false)),
       });
     } else if (request.method === "GET" && url.pathname === "/api/ai/batch") {
       const identifySpecies = normalizeIdentifySpecies(url.searchParams.get("identifySpecies"), aiBatchPreference.identifySpecies);
@@ -2327,6 +2384,7 @@ const server = http.createServer(async (request, response) => {
       });
       response.end(csv);
     } else if (request.method === "POST" && url.pathname === "/api/ai/jobs") {
+      if (performanceStore.isActive()) throw requestError(409, "已有辨識工作正在執行，請等待完成後再開始。");
       const runtime = await probeAiRuntime();
       if (!runtime.ready) {
         jsonResponse(response, 503, { ok: false, error: runtime.message, runtime });

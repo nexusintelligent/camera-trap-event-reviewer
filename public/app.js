@@ -1,3 +1,5 @@
+import { photoEntries, importOptions, isVideoFile } from "./media-options.js";
+
 const DECISIONS = [
   ["empty", "空觸發"],
   ["animal", "動物"],
@@ -62,6 +64,8 @@ const state = {
   videoUnlocked: false,
   serverAvailable: false,
   importFiles: [],
+  importCandidates: [],
+  importPreparing: false,
   importPreviewUrls: [],
   importJob: null,
   uploading: false,
@@ -404,7 +408,7 @@ function applyFilter() {
       || (contentFilter === "person_vehicle" && (labels.has("person") || labels.has("vehicle")));
     if (!matchesReview || !matchesContent) return false;
     if (!query) return true;
-    return [event.EventID, event.Photo1, event.Photo2, event.Photo3, event.Video, event.filenameHint, event.CommonName, event.TaxonCode]
+    return [event.EventID, ...photoEntries(event).map(({ token }) => token), event.Video, event.filenameHint, event.CommonName, event.TaxonCode]
       .join(" ").toLocaleLowerCase().includes(query);
   }).sort((left, right) => {
     const timeOrder = String(left.EventTime || "").localeCompare(String(right.EventTime || ""));
@@ -484,7 +488,7 @@ function renderMetadata(event) {
 function renderPhotos(event) {
   const grid = $("#photo-grid");
   grid.replaceChildren();
-  for (const key of ["Photo1", "Photo2", "Photo3"]) {
+  for (const { field: key } of photoEntries(event)) {
     const frame = document.createElement("div");
     frame.className = "photo-frame";
     if (event.media[key]) {
@@ -672,52 +676,58 @@ function renderAiBatch(status = state.aiBatchStatus) {
   }
   $("#identify-species-toggle").disabled = active || fastMode;
   $("#ai-goal-note").textContent = fastMode
-    ? "快速模式固定使用常駐 MegaDetector，只讀第 1、3 張照片；不載入 SpeciesNet，也不開啟影片。"
+    ? "快速模式取每組首尾照片；只有一張時讀取該張，不辨識物種或影片。若要辨識已匯入影片，請選完整模式。"
     : (shouldIdentifySpecies()
       ? "動物事件會自動接續 SpeciesNet；若物種模型判定為 blank，會改列空觸發並保留人工覆核。"
-      : "完整模式目前只判斷空觸發、動物、人與車輛，不執行物種辨識。");
+      : "完整模式辨識整組照片與已選影片中的動物、人與車輛；目前不執行物種辨識。");
   renderAiPerformance(status);
   renderUploadResults();
 }
 
 function formatPerformanceSeconds(value) {
   const seconds = Number(value || 0);
-  if (!seconds) return "—";
+  if (!Number.isFinite(seconds) || seconds < 0) return "—";
   if (seconds < 60) return `${seconds.toFixed(2)} 秒`;
   return `${Math.floor(seconds / 60)} 分 ${(seconds % 60).toFixed(1)} 秒`;
 }
 
 function renderAiPerformance(status) {
-  const performanceReport = status?.performance;
+  const candidate = status?.performance;
+  const performanceReport = candidate?.deploymentId === state.aiBatchId && candidate?.mode === selectedAiMode()
+    && Boolean(candidate?.identifySpecies) === shouldIdentifySpecies() ? candidate : null;
   const hardware = state.config?.aiRuntime?.hardware || {};
   const worker = status?.worker || {};
-  const device = performanceReport?.device || worker.device || hardware.device || "—";
-  const cuda = performanceReport?.cudaAvailable ?? worker.cudaAvailable ?? hardware.cudaAvailable;
+  const device = performanceReport?.device || (selectedAiMode() === "fast" ? worker.device : "") || "由模型選擇";
+  const cuda = performanceReport?.cudaAvailable ?? hardware.cudaAvailable;
   const gpuNames = performanceReport?.systemGpus || hardware.systemGpus || [];
-  $("#perf-device").textContent = `${device}${cuda ? " · CUDA 可用" : " · CUDA 不可用"}${gpuNames.length ? ` · ${gpuNames.join("、")}` : ""}`;
+  $("#perf-device").textContent = `${device}${cuda === true ? " · CUDA 可用" : cuda === false ? " · CUDA 不可用" : ""}${gpuNames.length ? ` · ${gpuNames.join("、")}` : ""}`;
+  const modeLabel = selectedAiMode() === "fast" ? "快速初篩" : (shouldIdentifySpecies() ? "完整＋物種辨識" : "完整辨識");
   if (!performanceReport) {
-    $("#perf-photos").textContent = "尚無新版批次紀錄";
-    $("#perf-model-loads").textContent = worker.modelLoadCount ? `${worker.modelLoadCount} 次（Worker 累計）` : "尚未啟動 Worker";
-    $("#perf-total").textContent = "—";
-    $("#perf-average").textContent = "—";
-    $("#perf-cache").textContent = "—";
-    $("#perf-stages").textContent = "完成下一次快速初篩後，這裡會列出各階段耗時。";
+    $("#perf-scope").textContent = `${state.aiBatchId || "尚未選擇批次"} · ${modeLabel} · 尚無紀錄`;
+    for (const id of ["photos", "model-loads", "total", "average", "cache", "videos", "progress"]) $(`#perf-${id}`).textContent = "—";
+    $("#perf-stages").textContent = "此批次在目前模式尚未執行。開始後自動更新，每組完成後累計處理量。";
     return;
   }
-  $("#perf-photos").textContent = `${performanceReport.requestedPhotos} 張（${performanceReport.events} 組）`;
-  $("#perf-model-loads").textContent = `${performanceReport.modelLoadCountThisBatch} 次（Worker 累計 ${performanceReport.workerModelLoadCount} 次）`;
-  $("#perf-total").textContent = formatPerformanceSeconds(performanceReport.timingsSeconds?.total);
-  $("#perf-average").textContent = `${Number(performanceReport.averageSecondsPerRequestedPhoto || 0).toFixed(3)} 秒／張`;
-  $("#perf-cache").textContent = `命中 ${performanceReport.detectionCacheHits}，實際推論 ${performanceReport.inferredPhotos}`;
+  const labels = { QUEUED: "等待中", RUNNING: "辨識中", COMPLETE: "完成", FAILED: "含失敗事件", CANCELLED: "已取消", INTERRUPTED: "上次執行中斷" };
+  const time = performanceReport.completedAt || performanceReport.startedAt || performanceReport.createdAt;
+  $("#perf-scope").textContent = `${performanceReport.deploymentId} · ${modeLabel} · ${status?.paused && performanceReport.status === "RUNNING" ? "暫停中" : labels[performanceReport.status] || performanceReport.status} · ${new Date(time).toLocaleString("zh-TW")}`;
+  $("#perf-photos").textContent = `${performanceReport.processedPhotos} / ${performanceReport.requestedPhotos} 張（${performanceReport.events} 組）`;
+  $("#perf-model-loads").textContent = performanceReport.mode === "fast"
+    ? `模型載入 ${performanceReport.modelLoadCountThisBatch} 次`
+    : `${performanceReport.pythonSubprocessesCreated} 次辨識程序（載入耗時含於流程）`;
+  $("#perf-total").textContent = formatPerformanceSeconds(performanceReport.timingsSeconds?.total || 0);
+  const average = performanceReport.averageSecondsPerRequestedPhoto;
+  $("#perf-average").textContent = average == null ? "等待照片完成" : `${Number(average).toFixed(3)} 秒／張${performanceReport.requestedVideos ? "（含影片耗時）" : ""}`;
+  $("#perf-cache").textContent = performanceReport.mode === "fast"
+    ? `命中 ${performanceReport.detectionCacheHits}，實際推論 ${performanceReport.inferredPhotos}` : "完整模式不使用快速偵測快取";
+  $("#perf-videos").textContent = `${performanceReport.videosOpened} / ${performanceReport.requestedVideos} 段 · ${performanceReport.videoFramesDecoded} 個取樣影格`;
+  $("#perf-progress").textContent = `完成 ${performanceReport.completedEvents} / ${performanceReport.events} · 失敗 ${performanceReport.failedEvents} · 取消 ${performanceReport.cancelledEvents}`;
   const timings = performanceReport.timingsSeconds || {};
-  $("#perf-stages").textContent = [
-    `收集 ${formatPerformanceSeconds(timings.collect)}`,
-    `快取讀取 ${formatPerformanceSeconds(timings.cacheRead)}`,
-    `Worker／模型啟動 ${formatPerformanceSeconds(timings.workerStartup)}`,
-    `照片解碼 ${formatPerformanceSeconds(timings.decode)}`,
-    `推論 ${formatPerformanceSeconds(timings.inference)}`,
-    `寫入結果 ${formatPerformanceSeconds(Number(timings.cacheWrite || 0) + Number(timings.persist || 0))}`,
-  ].join(" · ");
+  const stages = performanceReport.mode === "fast"
+    ? [["collect", "收集"], ["cacheRead", "讀取快取"], ["workerStartup", "模型啟動"], ["decode", "照片解碼"], ["inference", "推論"], ["cacheWrite", "寫入快取"], ["persist", "保存結果"]]
+    : [["prepare", "準備媒體"], ["videoDecode", "影片取樣"], ["pipelineInference", "模型流程（含載入與推論）"], ["persist", "保存結果"]];
+  $("#perf-stages").textContent = stages.filter(([key]) => timings[key] != null)
+    .map(([key, label]) => `${label} ${formatPerformanceSeconds(timings[key])}`).join(" · ") || "正在準備模型；耗時持續更新，完成事件後顯示各階段統計。";
 }
 
 function aiResultCategory(event) {
@@ -892,7 +902,7 @@ function openAiResultDetail(event) {
 
   const mediaGrid = $("#ai-result-media-grid");
   mediaGrid.replaceChildren();
-  for (const key of ["Photo1", "Photo2", "Photo3"]) {
+  for (const { field: key } of photoEntries(event)) {
     const figure = document.createElement("figure");
     if (event.media[key]) {
       const image = document.createElement("img");
@@ -937,8 +947,10 @@ function closeAiResultDetail() {
 async function pollAiBatch() {
   clearTimeout(state.aiBatchPollTimer);
   try {
-    const response = await fetch(aiBatchUrl());
+    const requestedUrl = aiBatchUrl();
+    const response = await fetch(requestedUrl);
     const payload = await response.json();
+    if (requestedUrl !== aiBatchUrl()) return;
     if (!response.ok) throw new Error(payload.error || "無法讀取批次辨識進度。");
     const previousFinished = Number(state.aiBatchStatus?.complete || 0) + Number(state.aiBatchStatus?.failed || 0);
     state.aiBatchStatus = payload.status;
@@ -1020,8 +1032,10 @@ async function toggleAiBatchPause() {
 }
 
 async function refreshAiBatchStatus() {
-  const response = await fetch(aiBatchUrl());
+  const requestedUrl = aiBatchUrl();
+  const response = await fetch(requestedUrl);
   const payload = await responseJson(response, "無法重新載入 AI 工作區狀態。");
+  if (requestedUrl !== aiBatchUrl()) return;
   state.aiBatchStatus = payload.status;
   state.aiBatchActive = Boolean(payload.status?.active);
   renderAiBatch(payload.status);
@@ -1092,6 +1106,7 @@ async function pollAiJob(jobId, eventId) {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "無法讀取 AI 工作狀態。");
     const job = payload.job;
+    await refreshAiBatchStatus();
     const log = $("#ai-job-log");
     log.classList.toggle("hidden", !job.logTail);
     log.textContent = [job.message, job.logTail].filter(Boolean).join("\n\n");
@@ -1395,7 +1410,7 @@ function updateImageDialog() {
 }
 
 function openImage(event, selectedKey) {
-  state.imageGallery = ["Photo1", "Photo2", "Photo3"]
+  state.imageGallery = photoEntries(event).map(({ field }) => field)
     .filter((key) => event.media[key])
     .map((key) => ({ key, source: event.media[key], caption: event[key], eventId: event.EventID }));
   state.imageGalleryIndex = Math.max(0, state.imageGallery.findIndex((item) => item.key === selectedKey));
@@ -1461,6 +1476,7 @@ function clearImportPreviews() {
 function resetImportSelection() {
   clearImportPreviews();
   state.importFiles = [];
+  state.importCandidates = [];
   state.importJob = null;
   $("#photo-picker").value = "";
   $("#folder-picker").value = "";
@@ -1471,6 +1487,35 @@ function resetImportSelection() {
   $("#prepare-job-button").textContent = "上傳並建立事件";
   $("#clear-import-button").disabled = true;
   $("#job-result").hidden = true;
+  lockImportOptions(false);
+}
+
+function selectedImportOptions() {
+  return importOptions({
+    photosPerEvent: Number($("#import-photos-per-event").value),
+    includeVideos: document.querySelector('input[name="import-include-videos"]:checked')?.value === "yes",
+  });
+}
+
+function lockImportOptions(locked) {
+  for (const input of document.querySelectorAll('#import-photos-per-event, input[name="import-include-videos"]')) input.disabled = locked;
+}
+
+function updateImportOptions() {
+  let options;
+  try { options = selectedImportOptions(); } catch (error) {
+    $("#import-grouping-note").textContent = error.message;
+    $("#prepare-job-button").disabled = true;
+    return false;
+  }
+  const images = ".jpg,.jpeg,.png,.webp";
+  const accept = images + (options.includeVideos ? ",.avi,.mp4,.mov" : "");
+  $("#photo-picker").accept = accept;
+  $("#folder-picker").accept = accept;
+  $("#choose-photos-button").textContent = options.includeVideos ? "選擇照片／影片" : "選擇照片";
+  const gap = state.config?.webUpload?.eventGapSeconds ?? 120;
+  $("#import-grouping-note").textContent = `依資料夾與檔案時間排序，每組最多 ${options.photosPerEvent} 張照片；${options.includeVideos ? "最多搭配 1 段影片" : "不匯入影片"}。時間間隔超過 ${gap} 秒另起一組。`;
+  return true;
 }
 
 async function clearImportSelection() {
@@ -1531,13 +1576,17 @@ function renderImportPreview() {
 }
 
 async function handleImportFiles(fileList) {
-  if (state.uploading) return;
-  if (state.importJob && state.importFiles.some((item) => item.uploaded)) {
+  if (state.uploading || state.importPreparing) return;
+  if (state.importJob) {
     showToast("目前有未完成上傳；請先按「清除已選檔案」或繼續完成上傳。", true);
     return;
   }
-  const candidates = [...fileList]
+  if (!updateImportOptions()) return;
+  const options = selectedImportOptions();
+  state.importCandidates = [...fileList];
+  const candidates = state.importCandidates
     .filter((file) => ACCEPTED_MEDIA_EXTENSIONS.has(fileExtension(file.name)))
+    .filter((file) => options.includeVideos || !isVideoFile(file.name))
     .filter((file, index, all) => {
       const key = `${file.webkitRelativePath || file.name}:${file.size}:${file.lastModified}`;
       return all.findIndex((candidate) => `${candidate.webkitRelativePath || candidate.name}:${candidate.size}:${candidate.lastModified}` === key) === index;
@@ -1548,12 +1597,14 @@ async function handleImportFiles(fileList) {
   $("#prepare-job-button").disabled = true;
   $("#prepare-job-button").textContent = "上傳並建立事件";
   if (!candidates.length) {
-    $("#import-summary").textContent = "沒有可接受的照片或影片。";
+    $("#import-summary").textContent = options.includeVideos ? "沒有可接受的照片或影片。" : "沒有可接受的照片；影片已依「否」設定略過。";
     $("#clear-import-button").disabled = true;
     clearImportPreviews();
     return;
   }
   const progress = $("#hash-progress");
+  state.importPreparing = true;
+  lockImportOptions(true);
   progress.hidden = false;
   progress.max = candidates.length;
   progress.value = 0;
@@ -1573,7 +1624,11 @@ async function handleImportFiles(fileList) {
   if (!$("#import-deployment-name").value && folders.size === 1 && !folders.has("單檔選取")) {
     $("#import-deployment-name").value = [...folders][0];
   }
-  $("#import-summary").textContent = `已檢查 ${state.importFiles.length} 個檔案 · ${folders.size} 個來源 · ${formatBytes(totalBytes)} · 預估約 ${Math.ceil(state.importFiles.length / 4)} 個事件`;
+  const videos = state.importFiles.filter((item) => isVideoFile(item.file.name)).length;
+  const skippedVideos = !options.includeVideos ? state.importCandidates.filter((file) => isVideoFile(file.name)).length : 0;
+  $("#import-summary").textContent = `已選 ${state.importFiles.length - videos} 張照片、${videos} 段影片 · ${formatBytes(totalBytes)} · 每組最多 ${options.photosPerEvent} 張${skippedVideos ? ` · 已略過 ${skippedVideos} 段影片` : ""}`;
+  state.importPreparing = false;
+  lockImportOptions(false);
   $("#prepare-job-button").disabled = false;
   $("#clear-import-button").disabled = false;
   renderImportPreview();
@@ -1616,8 +1671,9 @@ async function syncEventsFromServer({ reason = "manual", includeBatch = true } =
     const previousUploadBatchId = state.uploadBatchId;
     const previousAiBatchId = state.aiBatchId;
     const wasDirty = state.dirty;
+    const requestedBatchUrl = aiBatchUrl();
     const requests = [fetch(serviceUrl("/api/events"))];
-    if (includeBatch) requests.push(fetch(aiBatchUrl()));
+    if (includeBatch) requests.push(fetch(requestedBatchUrl));
     const [eventsResponse, batchResponse] = await Promise.all(requests);
     const eventPayload = await responseJson(eventsResponse, "無法同步 AI 與人工覆核資料。");
     state.events = eventPayload.events.map(normalizeEvent);
@@ -1625,7 +1681,7 @@ async function syncEventsFromServer({ reason = "manual", includeBatch = true } =
     state.currentId = state.events.some((event) => event.EventID === previousCurrentId)
       ? previousCurrentId
       : (reviewEvents()[0]?.EventID || state.events[0]?.EventID || null);
-    if (batchResponse) {
+    if (batchResponse && requestedBatchUrl === aiBatchUrl()) {
       const batchPayload = await responseJson(batchResponse, "無法同步 AI 批次狀態。");
       state.aiBatchStatus = batchPayload.status;
       state.aiBatchActive = Boolean(batchPayload.status?.active);
@@ -1663,7 +1719,15 @@ function requestEventSync(reason, force = false) {
 
 async function uploadImportJob() {
   if (!state.importFiles.length || state.uploading) return;
+  if (!(state.config?.webUpload?.importOptionsVersion >= 1)) {
+    const message = "本機程式尚未支援自訂分組，請更新至 v3.2 或更新版本，停止舊版服務後重新啟動，再重新整理網站。尚未上傳任何檔案。";
+    $("#import-summary").textContent = message;
+    showToast(message, true);
+    return;
+  }
+  if (!updateImportOptions()) return;
   state.uploading = true;
+  lockImportOptions(true);
   const button = $("#prepare-job-button");
   const progress = $("#hash-progress");
   const result = $("#job-result");
@@ -1681,6 +1745,7 @@ async function uploadImportJob() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           schemaVersion: "2.1",
+          ...selectedImportOptions(),
           deploymentName: $("#import-deployment-name").value.trim(),
           media: state.importFiles.map((item) => ({
             relativePath: item.relativePath,
@@ -1737,6 +1802,7 @@ async function uploadImportJob() {
     showToast(`已建立 ${completed.eventIds.length} 個可辨識事件`);
     clearImportPreviews();
     state.importFiles = [];
+    state.importCandidates = [];
     state.importJob = null;
     $("#clear-import-button").disabled = true;
     $("#photo-picker").value = "";
@@ -1748,6 +1814,7 @@ async function uploadImportJob() {
     showToast(error.message, true);
   } finally {
     state.uploading = false;
+    lockImportOptions(Boolean(state.importJob));
     progress.hidden = state.importFiles.length === 0;
     button.textContent = state.importFiles.length ? "繼續上傳並建立事件" : "上傳並建立事件";
     $("#clear-import-button").disabled = state.importFiles.length === 0;
@@ -1755,6 +1822,13 @@ async function uploadImportJob() {
 }
 
 function initializeControls() {
+  updateImportOptions();
+  for (const input of document.querySelectorAll('#import-photos-per-event, input[name="import-include-videos"]')) {
+    input.addEventListener("change", () => {
+      if (state.uploading || state.importPreparing || state.importJob) return;
+      if (updateImportOptions() && state.importCandidates.length) void handleImportFiles(state.importCandidates);
+    });
+  }
   for (const [id, options] of Object.entries(SELECT_OPTIONS)) {
     const element = document.getElementById(id);
     if (element) optionSelect(element, options);

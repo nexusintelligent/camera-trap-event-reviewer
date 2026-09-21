@@ -13,7 +13,7 @@
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="./icons/icon-180.png">
-  <link rel="stylesheet" href="./styles.css?v=3.1.1">
+  <link rel="stylesheet" href="./styles.css?v=3.2.0">
 </head>
 <body>
   <header class="topbar">
@@ -103,11 +103,11 @@
           <legend>辨識速度</legend>
           <label>
             <input type="radio" name="ai-mode" value="fast" checked>
-            <span><strong>快速初篩</strong><small>常駐 MegaDetector 整批處理第 1、3 張；不載入 SpeciesNet、不讀影片。</small></span>
+            <span><strong>快速初篩</strong><small>取每組首尾照片（單張只讀一次）；不辨識影片或物種。</small></span>
           </label>
           <label>
             <input type="radio" name="ai-mode" value="full">
-            <span><strong>完整辨識</strong><small>分析三張照片；勾選物種時也納入影片與 SpeciesNet。</small></span>
+            <span><strong>完整辨識</strong><small>分析整組照片；依匯入設定加入影片，可另勾選物種辨識。</small></span>
           </label>
         </fieldset>
 
@@ -125,17 +125,20 @@
           <progress id="ai-batch-progress" value="0" max="1">0%</progress>
           <small id="ai-batch-current">尚未啟動批次工作</small>
         </div>
-        <details class="ai-performance-panel" id="ai-performance-panel">
-          <summary>快速模式效能診斷</summary>
+        <details class="ai-performance-panel" id="ai-performance-panel" open>
+          <summary>辨識效能（所有模式）</summary>
+          <p id="perf-scope" aria-live="polite">選擇批次與辨識模式後顯示。</p>
           <div class="performance-grid">
             <div><span>照片／事件</span><strong id="perf-photos">—</strong></div>
-            <div><span>模型載入</span><strong id="perf-model-loads">—</strong></div>
-            <div><span>裝置</span><strong id="perf-device">—</strong></div>
+            <div><span>模型／辨識程序</span><strong id="perf-model-loads">—</strong></div>
+            <div><span>執行裝置／可用硬體</span><strong id="perf-device">—</strong></div>
             <div><span>偵測快取</span><strong id="perf-cache">—</strong></div>
-            <div><span>總處理時間</span><strong id="perf-total">—</strong></div>
-            <div><span>每張平均</span><strong id="perf-average">—</strong></div>
+            <div><span>已用處理時間（不含等待暫停）</span><strong id="perf-total">—</strong></div>
+            <div><span>每張已完成照片平均</span><strong id="perf-average">—</strong></div>
+            <div><span>影片／取樣影格</span><strong id="perf-videos">—</strong></div>
+            <div><span>本次執行進度</span><strong id="perf-progress">—</strong></div>
           </div>
-          <p id="perf-stages">完成快速初篩後顯示各階段耗時。</p>
+          <p id="perf-stages">辨識開始後更新耗時，每組完成後累計處理量。</p>
         </details>
       </article>
     </section>
@@ -145,7 +148,7 @@
         <div>
           <div class="card-kicker">03 · 當次辨識結果</div>
           <h3 id="upload-results-title">快速查看每一組的 AI 判定</h3>
-          <p>清單只顯示一張小縮圖與主要結果；點開事件後才載入三張照片與影片。</p>
+          <p>清單顯示縮圖與主要結果；點開事件後可查看整組照片與已匯入影片。</p>
         </div>
         <label class="batch-select-label">查看匯入批次
           <select id="upload-results-batch-select" aria-label="選擇辨識結果批次"></select>
@@ -235,7 +238,7 @@
             <span class="step-number">01</span>
             <div>
               <h3>照片優先判讀</h3>
-              <p>先看同一次觸發的三張照片；暫時不要用影片補答案。</p>
+              <p>先看這組的全部照片，再依需要開啟影片覆核。</p>
             </div>
           </div>
           <div class="shortcut-note">點照片可放大</div>
@@ -449,7 +452,7 @@
   <dialog id="import-dialog" class="import-dialog">
     <div class="dialog-head">
       <div>
-        <div class="eyebrow">LOCAL WORKSPACE · V3.1.1</div>
+        <div class="eyebrow">LOCAL WORKSPACE · V3.2</div>
         <h2>選擇媒體並建立事件</h2>
       </div>
       <button id="close-import-dialog" type="button" aria-label="關閉">×</button>
@@ -460,11 +463,24 @@
         <span>資料批次名稱</span>
         <input id="import-deployment-name" type="text" maxlength="48" placeholder="例如：LOC001-CAM023-2026-08">
       </label>
+      <div class="import-options">
+        <label class="import-field">
+          <span>幾張照片為一組</span>
+          <input id="import-photos-per-event" type="number" min="1" max="100" step="1" value="3" required aria-describedby="import-grouping-note">
+          <small>可設定 1–100 張；不足一組的照片仍會保留。</small>
+        </label>
+        <fieldset class="import-video-options">
+          <legend>是否加入並辨識影片</legend>
+          <label><input type="radio" name="import-include-videos" value="no" checked> 否，只匯入照片</label>
+          <label><input type="radio" name="import-include-videos" value="yes"> 是，一併匯入影片</label>
+          <small>影片在完整模式取樣辨識；快速模式只處理照片。</small>
+        </fieldset>
+      </div>
       <input id="photo-picker" type="file" accept=".jpg,.jpeg,.png,.webp,.avi,.mp4,.mov" multiple hidden>
       <input id="folder-picker" type="file" accept=".jpg,.jpeg,.png,.webp,.avi,.mp4,.mov" webkitdirectory directory multiple hidden>
       <div class="drop-zone" id="drop-zone" tabindex="0" role="button" aria-label="拖放媒體或開啟檔案選擇">
         <strong>將照片或事件資料夾拖曳到這裡</strong>
-        <span>支援 JPG、PNG、WEBP、AVI、MP4、MOV</span>
+        <span id="import-supported-formats">支援 JPG、PNG、WEBP；選「是」可加入 AVI、MP4、MOV</span>
         <div class="drop-zone-actions">
           <button class="button primary" id="choose-photos-button" type="button">選擇照片／影片</button>
           <button class="button ghost" id="choose-folder-button" type="button">選擇整個資料夾</button>
@@ -474,7 +490,7 @@
       <progress id="hash-progress" max="1" value="0" hidden></progress>
       <div class="import-preview" id="import-preview"></div>
       <div class="import-actions">
-        <span>完成後會自動依資料夾、拍攝時間及「3 張照片＋1 段影片」規則建立事件。</span>
+        <span id="import-grouping-note">依資料夾與檔案時間排序，每組最多 3 張照片；不匯入影片。時間間隔超過 120 秒另起一組。</span>
         <button class="button ghost" id="clear-import-button" type="button" disabled>清除已選檔案</button>
         <button class="button primary" id="prepare-job-button" type="button" disabled>上傳並建立事件</button>
       </div>
@@ -503,6 +519,6 @@
   </dialog>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="./app.js?v=3.1.1"></script>
+  <script type="module" src="./app.js?v=3.2.0"></script>
 </body>
 </html>

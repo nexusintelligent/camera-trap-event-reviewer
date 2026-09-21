@@ -1,7 +1,7 @@
 {
   "product": "相機陷阱本機辨識器",
-  "version": "3.1.1",
-  "buildDate": "2026-08-30",
+  "version": "3.2.0",
+  "buildDate": "2026-09-21",
   "deploymentId": "LOCAL-WORKSPACE",
   "eventCount": 0,
   "workflow": "private local upload, event grouping, MegaDetector/SpeciesNet inference, manual review and CSV export",
@@ -20,7 +20,10 @@
     "empty local workspace startup",
     "local API and GitHub Pages CORS",
     "web upload media signature validation",
-    "automatic event creation and CSV export"
+    "automatic event creation and CSV export",
+    "configurable group sizes and video opt-out",
+    "fast/full/species performance per run and deployment (model doubles)",
+    "multi-batch live progress, cache retry, failure and restart persistence"
   ],
   "browserChecks": [
     "private-local landing screen",
