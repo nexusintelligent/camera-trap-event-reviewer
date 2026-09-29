@@ -1,6 +1,6 @@
 {
   "product": "相機陷阱本機辨識器",
-  "version": "3.2.1",
+  "version": "3.2.2",
   "buildDate": "2026-09-29",
   "deploymentId": "LOCAL-WORKSPACE",
   "eventCount": 0,
@@ -22,6 +22,7 @@
     "web upload media signature validation",
     "automatic event creation and CSV export",
     "batch-scoped CSV export, Unicode filenames, saved reviews and restart persistence",
+    "Chinese summary CSV, dynamic 1/5/100-photo columns, partial and mixed batches, legacy media and unchanged internal storage",
     "configurable group sizes and video opt-out",
     "fast/full/species performance per run and deployment (model doubles)",
     "multi-batch live progress, cache retry, failure and restart persistence"

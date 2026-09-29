@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { photoEntries, fastPhotoEntries, isVideoFile } from "../public/media-options.js";
+import { parseCsv } from "../lib/csv.mjs";
 import { PerformanceStore } from "../lib/performance-store.mjs";
 
 const python = process.env.CAMTRAP_TEST_PYTHON;
@@ -185,7 +186,14 @@ def imwrite(path,frame):
   assert.ok(c.events[0].media.Video);
   const boundaries = await importBatch("boundaries", 5, false, [item("a.png"), item("b.png", 200), item("c.png", 201, "other")]);
   assert.equal(boundaries.events.length, 3, "folder and time boundaries retained");
-  assert.ok((await (await fetch(base + "/api/export.csv")).text()).includes("PhotoFiles"));
+  const exported = parseCsv(await (await fetch(base + "/api/export.csv")).text());
+  const fivePhotoRow = exported.find((event) => event["事件編號"] === a.events[0].EventID);
+  assert.equal(fivePhotoRow["照片5"], photoEntries(a.events[0])[4].token);
+  assert.ok(!("PhotoFiles" in fivePhotoRow));
+  assert.ok(!("照片6" in fivePhotoRow));
+  const onePhotoRows = parseCsv(await (await fetch(`${base}/api/export.csv?deploymentId=${encodeURIComponent(b.id)}`)).text());
+  assert.equal(onePhotoRows.length, 2);
+  assert.ok(onePhotoRows.every((event) => event["照片1"] && !("照片2" in event) && !("影片" in event)));
 
   await api("/api/ai/batch", { deploymentId: a.id, mode: "fast" });
   const first = await waitBatch(a.id, "fast");

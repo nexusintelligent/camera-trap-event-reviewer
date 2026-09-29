@@ -1534,7 +1534,9 @@ async function openExportDialog() {
     const config = await responseJson(configResponse, "無法讀取本機程式版本。");
     const payload = await responseJson(eventsResponse, "無法讀取匯出批次。");
     if (requestId !== state.exportRequestId) return;
-    if (!config.csvExport?.batchSelection) throw new Error("請將本機辨識器更新至 v3.2.1 或更新版本，停止舊服務後重新啟動，再匯出批次 CSV。");
+    if (!config.csvExport?.batchSelection || !config.csvExport?.localizedSummary || !config.csvExport?.dynamicPhotoColumns) {
+      throw new Error("請將本機辨識器更新至 v3.2.2 或更新版本，停止舊服務後重新啟動，再匯出中文欄位 CSV。");
+    }
     state.exportEvents = payload.events;
     const groups = new Map();
     for (const event of state.exportEvents) {
