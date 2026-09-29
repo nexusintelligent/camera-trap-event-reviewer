@@ -8,6 +8,7 @@ import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { parseCsv, stringifyCsv } from "./lib/csv.mjs";
+import { selectExportEvents, exportDisposition } from "./lib/csv-export.mjs";
 import { PersistentMegaDetectorWorker } from "./lib/megadetector-worker.mjs";
 import { PerformanceStore } from "./lib/performance-store.mjs";
 import { importOptions, photoEntries, fastPhotoEntries, eventMediaEntries, shouldUseVideo } from "./public/media-options.js";
@@ -2292,6 +2293,7 @@ const server = http.createServer(async (request, response) => {
         mediaRoot: config.mediaRoot,
         photoFirstWorkflow: true,
         schemaVersion: "2.1",
+        csvExport: { batchSelection: true },
         webUpload: {
           enabled: true,
           importOptionsVersion: 1,
@@ -2375,10 +2377,14 @@ const server = http.createServer(async (request, response) => {
       await finalizeImportSession(session);
       jsonResponse(response, 201, { ok: true, import: publicImportSession(session), status: statusSummary() });
     } else if (request.method === "GET" && url.pathname === "/api/export.csv") {
-      const csv = stringifyCsv(events, ALL_FIELDS);
+      await saveQueue;
+      const selection = selectExportEvents(events, url.searchParams);
+      const csv = stringifyCsv(selection.events, ALL_FIELDS);
       response.writeHead(200, {
         "Content-Type": "text/csv; charset=utf-8",
-        "Content-Disposition": "attachment; filename=\"camera_trap_events.csv\"",
+        "Content-Disposition": exportDisposition(selection.deploymentId),
+        "Access-Control-Expose-Headers": "Content-Disposition, X-CameraTrap-Export-Version",
+        "X-CameraTrap-Export-Version": "1",
         "Content-Length": Buffer.byteLength(csv),
         "Cache-Control": "no-store",
       });

@@ -1,6 +1,6 @@
 {
   "name": "camera-trap-event-reviewer",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,6 +8,7 @@
     "smoke": "node test/smoke.mjs",
     "smoke:local": "node test/local-smoke.mjs",
     "test:workflow": "node test/workflow-regression.mjs",
+    "test:export": "node test/csv-export.mjs",
     "build:sites": "node scripts/build-sites.mjs"
   }
 }

@@ -69,6 +69,10 @@ const state = {
   importPreviewUrls: [],
   importJob: null,
   uploading: false,
+  exportEvents: [],
+  exportLoaded: false,
+  exporting: false,
+  exportRequestId: 0,
   aiJobId: null,
   aiJobEventId: null,
   aiPollTimer: null,
@@ -1497,6 +1501,104 @@ function selectedImportOptions() {
   });
 }
 
+function renderExportSummary() {
+  $("#export-feedback").hidden = true;
+  const select = $("#export-batch-select");
+  const rows = select.value === "all" ? state.exportEvents
+    : state.exportEvents.filter((event) => `batch:${event.DeploymentID}` === select.value);
+  const complete = rows.filter((event) => event.AIStatus === "AI_COMPLETE").length;
+  $("#export-summary").textContent = rows.length
+    ? `${select.selectedOptions[0]?.textContent}。AI 已完成 ${complete} 組，尚未完成 ${rows.length - complete} 組。`
+    : "此工作區尚無可匯出的事件，請先匯入照片。";
+  $("#export-unsaved").hidden = !state.dirty;
+  $("#download-export-button").disabled = state.exporting || !state.exportLoaded || !rows.length;
+}
+
+async function openExportDialog() {
+  const dialog = $("#export-dialog");
+  if (dialog.open || state.exporting) return;
+  openModalDialog(dialog);
+  const requestId = ++state.exportRequestId;
+  const select = $("#export-batch-select");
+  select.replaceChildren(new Option("正在讀取批次…", ""));
+  select.disabled = true;
+  state.exportLoaded = false;
+  $("#export-feedback").hidden = true;
+  $("#download-export-button").disabled = true;
+  $("#export-summary").textContent = "正在讀取這台電腦上已儲存的批次…";
+  $("#export-unsaved").hidden = !state.dirty;
+  try {
+    const [configResponse, eventsResponse] = await Promise.all([
+      fetch(serviceUrl("/api/config")), fetch(serviceUrl("/api/events")),
+    ]);
+    const config = await responseJson(configResponse, "無法讀取本機程式版本。");
+    const payload = await responseJson(eventsResponse, "無法讀取匯出批次。");
+    if (requestId !== state.exportRequestId) return;
+    if (!config.csvExport?.batchSelection) throw new Error("請將本機辨識器更新至 v3.2.1 或更新版本，停止舊服務後重新啟動，再匯出批次 CSV。");
+    state.exportEvents = payload.events;
+    const groups = new Map();
+    for (const event of state.exportEvents) {
+      if (event.DeploymentID) groups.set(event.DeploymentID, (groups.get(event.DeploymentID) || 0) + 1);
+    }
+    select.replaceChildren();
+    for (const [id, count] of [...groups].reverse()) select.append(new Option(`${id}（${count} 組）`, `batch:${id}`));
+    select.append(new Option(`全部批次（${state.exportEvents.length} 組）`, "all"));
+    // Start with the batch the user is viewing, not whichever ran most recently.
+    const preferred = state.currentView === "review" ? currentEvent()?.DeploymentID : state.uploadBatchId;
+    select.value = groups.has(preferred) ? `batch:${preferred}` : (groups.size ? `batch:${[...groups.keys()].at(-1)}` : "all");
+    state.exportLoaded = true;
+    select.disabled = state.exportEvents.length === 0;
+    renderExportSummary();
+  } catch (error) {
+    if (requestId !== state.exportRequestId) return;
+    select.replaceChildren(new Option("無法讀取批次", ""));
+    $("#export-summary").textContent = error instanceof TypeError
+      ? "無法連線到本機辨識器，請啟動服務後重新開啟匯出視窗。" : error.message;
+  }
+}
+
+async function downloadExportCsv() {
+  if (state.exporting || !state.exportLoaded || $("#download-export-button").disabled) return;
+  const select = $("#export-batch-select");
+  const parameters = new URLSearchParams();
+  if (select.value !== "all") parameters.set("deploymentId", select.value.slice("batch:".length));
+  state.exporting = true;
+  select.disabled = true;
+  const button = $("#download-export-button");
+  button.disabled = true;
+  button.textContent = "正在準備 CSV…";
+  $("#export-feedback").hidden = true;
+  try {
+    const response = await fetch(serviceUrl(`/api/export.csv?${parameters}`));
+    if (!response.ok) await responseJson(response, "無法匯出 CSV。");
+    // An older local server ignores the filter. Never silently download all data.
+    if (response.headers.get("X-CameraTrap-Export-Version") !== "1") throw new Error("本機程式尚未支援批次匯出，請更新並重新啟動本機辨識器。");
+    const filename = /filename\*=UTF-8''([^;]+)/i.exec(response.headers.get("Content-Disposition") || "")?.[1];
+    if (!filename) throw new Error("匯出檔案資訊不完整，請重新開啟匯出視窗後再試。");
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = decodeURIComponent(filename);
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    $("#export-feedback").textContent = `已送出下載：${link.download}。請在瀏覽器的下載清單查看檔案。`;
+    $("#export-feedback").hidden = false;
+    showToast(`已準備下載：${select.selectedOptions[0]?.textContent}`);
+  } catch (error) {
+    $("#export-summary").textContent = error instanceof TypeError
+      ? "下載失敗，請確認本機辨識器仍在執行後重試。" : error.message;
+    showToast($("#export-summary").textContent, true);
+  } finally {
+    state.exporting = false;
+    select.disabled = false;
+    button.disabled = false;
+    button.textContent = "下載 CSV";
+  }
+}
+
 function lockImportOptions(locked) {
   for (const input of document.querySelectorAll('#import-photos-per-event, input[name="import-include-videos"]')) input.disabled = locked;
 }
@@ -1822,6 +1924,10 @@ async function uploadImportJob() {
 }
 
 function initializeControls() {
+  $("#export-link").addEventListener("click", openExportDialog);
+  $("#close-export-dialog").addEventListener("click", () => closeModalDialog($("#export-dialog")));
+  $("#export-batch-select").addEventListener("change", renderExportSummary);
+  $("#download-export-button").addEventListener("click", downloadExportCsv);
   updateImportOptions();
   for (const input of document.querySelectorAll('#import-photos-per-event, input[name="import-include-videos"]')) {
     input.addEventListener("change", () => {
@@ -2018,7 +2124,6 @@ function initializeControls() {
 async function start() {
   initializeControls();
   initializePwa();
-  $("#export-link").href = serviceUrl("/api/export.csv");
   try {
     const [configResponse, eventsResponse, taxonomyResponse] = await Promise.all([
       fetch(serviceUrl("/api/config")),
